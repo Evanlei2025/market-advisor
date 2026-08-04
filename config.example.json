@@ -1,0 +1,20 @@
+{
+  "push": {
+    "channel": "none",
+    "wecom_webhook": "",
+    "serverchan_key": ""
+  },
+  "target": {
+    "equity": 0.45,
+    "bond": 0.45,
+    "gold": 0.1
+  },
+  "rebalance_band": 0.05,
+  "holdings": [
+    { "name": "沪深300ETF(510300)", "code": "510300", "type": "equity", "amount": 50000 },
+    { "name": "中证红利ETF(515080)", "code": "515080", "type": "equity", "amount": 30000 },
+    { "name": "场外债券基金", "code": "", "fund_code": "", "type": "bond", "amount": 80000, "yield_pct": 3.0 },
+    { "name": "黄金ETF(518880)", "code": "518880", "type": "gold", "amount": 20000 },
+    { "name": "货币基金/现金", "code": "", "type": "cash", "amount": 10000, "yield_pct": 1.6 }
+  ]
+}

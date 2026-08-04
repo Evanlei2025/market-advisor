@@ -1,0 +1,43 @@
+name: daily-report
+
+on:
+  schedule:
+    # 北京时间 15:35 = UTC 07:35，周一至周五
+    - cron: '35 7 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily report
+        env:
+          ADVISOR_CONFIG_JSON: ${{ secrets.ADVISOR_CONFIG }}
+          TQDM_DISABLE: '1'
+        run: python main.py
+
+      - name: Upload report archive
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-archive
+          path: reports/*.md
+          retention-days: 90
