@@ -14,6 +14,7 @@ import pandas as pd
 import requests
 
 import llm
+import style
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -324,15 +325,17 @@ def analyze_product(fetcher, p):
                 reason += "；管理费偏高需长期持有摊薄成本"
 
     line1 = f"- **{code} {fname}**（{ptype}类）"
-    line2 = (f"  净值 {nav_str}；近1周{pct(r1w)} 近1月{pct(r1m)} 近3月{pct(r3m)} "
-             f"近6月{pct(r6m)} 近1年{pct(r1y)}；近1年最大回撤 {max_dd*100:.1f}%")
-    line3 = "  " + "；".join(x for x in [f"同类排名 {ranking}" if ranking else "",
+    line2 = f"  净值 {nav_str}"
+    line3 = f"  区间收益：近1周{pct(r1w)} 近1月{pct(r1m)} 近3月{pct(r3m)}"
+    line4 = f"  近6月{pct(r6m)} 近1年{pct(r1y)} 近1年回撤 {max_dd*100:.1f}%"
+    line5 = "  " + "；".join(x for x in [f"同类排名 {ranking}" if ranking else "",
                                           f"规模 {scale}" if scale else "",
                                           f"成立 {inception}" if inception else "",
-                                          f"经理 {manager}" if manager else "",
-                                          f"费用 {fees_str}" if fees_str else "",
-                                          f"平台 {p.get('platform','')}" if p.get("platform") else ""] if x)
-    line4 = f"  规则信号: {signal}（{reason}）"
+                                          f"经理 {manager}" if manager else ""] if x)
+    line6 = "  " + "；".join(x for x in [f"费用 {fees_str}" if fees_str else "",
+                                          f"平台 {p.get('platform','')}" if p.get("platform") else "",
+                                          f"备注 {p.get('notes','')}" if p.get("notes") else ""] if x)
+    line7 = f"  规则信号: {signal}（{reason}）"
 
     ctx.update({
         "unavailable": False, "name": fname,
@@ -343,7 +346,7 @@ def analyze_product(fetcher, p):
         "scale": scale, "inception": inception, "manager": manager,
         "fees": fees_str or "无", "signal": f"{signal}（{reason}）",
     })
-    return ([line1, line2, line3, line4], ctx)
+    return ([line1, line2, line3, line4, line5, line6, line7], ctx)
 
 
 def main():
@@ -526,8 +529,8 @@ def main():
             if not title or pd_isna(title):
                 title = str(row["内容"])[:60]
             title = title.replace("【", "").replace("】", " ")
-            if len(title) > 62:
-                title = title[:62] + "…"
+            if len(title) > 48:
+                title = title[:48] + "…"
             L(f"- {title}")
         for _, row in news.head(20).iterrows():
             title = str(row["标题"]).strip()
@@ -733,11 +736,13 @@ def push_serverchan(key, title, md):
     if not key:
         log("[WARN] 未配置 Server酱 key，跳过推送")
         return
+    # 银行风样式（HTML）仅用于 Server酱渠道
+    styled = style.style_report(md)
     last_err = None
     for attempt in range(1, PUSH_RETRY + 1):
         try:
             r = requests.post(f"https://sctapi.ftqq.com/{key}.send",
-                              data={"title": title, "desp": md}, timeout=15)
+                              data={"title": title, "desp": styled}, timeout=15)
             j = r.json()
             log(f"Server酱推送: code={j.get('code')}")
             return
