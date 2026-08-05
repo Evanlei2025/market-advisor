@@ -318,9 +318,10 @@ def main():
         last = gold.iloc[-1]["close"]
         ma120 = sma(gold["close"], 120).iloc[-1]
         m20 = last / gold["close"].iloc[-21] - 1 if len(gold) > 21 else 0.0
+        d1 = last / gold["close"].iloc[-2] - 1 if len(gold) > 2 else 0.0
         trend = "多头" if last > ma120 else "空头"
-        L(f"- Au99.99: ¥{last:.2f}，20日动量 {m20:+.1%}，趋势{trend}")
-        gold_ctx["Au99.99"] = f"¥{last:.2f}，20日动量 {m20:+.1%}，趋势{trend}"
+        L(f"- Au99.99: ¥{last:.2f}，当日 {d1:+.2%}，20日动量 {m20:+.1%}，趋势{trend}")
+        gold_ctx["Au99.99"] = f"¥{last:.2f}，当日 {d1:+.2%}，20日动量 {m20:+.1%}，趋势{trend}"
         gold_sig = 0.5 if last > ma120 else -0.5
         L(f"- 黄金研判: {'趋势向上，可持有' if trend == '多头' else '趋势向下，暂不加仓'}")
     else:
