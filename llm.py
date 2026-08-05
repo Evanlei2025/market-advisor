@@ -54,9 +54,10 @@ SYSTEM_PROMPT = """你是一位资深买方资产配置分析师，服务对象�
   - 各板块解读禁止复述自己板块数据行已列出的数值（数据行客户已看到）；禁止与 overview 或其他板块解读内容重复
   - 解读只允许引用最多1个数值来支撑观点，其余聚焦"意味着什么、影响什么、怎么办"
 - **要闻纪律：news 与 product_news 中提到的每一条新闻，都必须是上文"财联社当日要闻"列表中出现的（可概括原话），不得提及输入中不存在的任何新闻事件或板块行情；若列表中没有与产品行业相关的新闻，product_news 写"今日无直接相关要闻"**
-- **长度硬约束：overview≤40字；market/valuation/bond/gold/macro 各≤70字；news≤90字；action≤110字；risk≤70字；产品建议每条≤90字。超出即废稿**
+- **短句纪律：所有解读使用短句，每句不超过20字，句号或分号后必须换行（每条解读文本内为多行短句）；禁止超长单行文本**
+- **长度硬约束：overview≤40字；market/valuation/bond/gold/macro 各≤70字；news≤90字；action≤170字；risk 每条≤45字；产品建议每条≤70字。超出即废稿**
 - 产品操作建议必须结合该产品"费用"与"同类排名"：如费率较高则明确提示"短期进出不划算，适合长期持有"
-- 每个产品一段建议 60-90 字
+- **产品建议纪律：advice 内不得出现任何其他产品编号或名称；只针对本产品**
 
 ## 输出格式
 只输出一个 JSON 对象（不要输出任何其他文字、不要 markdown 代码块）：
@@ -68,12 +69,12 @@ SYSTEM_PROMPT = """你是一位资深买方资产配置分析师，服务对象�
   "gold": "黄金解读（≤70字）",
   "macro": "宏观与资金面解读（≤70字）",
   "news": "要闻解读（≤90字）：挑1-2条对客户投资有实际影响的",
-  "action": "操作建议解读（≤110字）：今天该做什么、为什么、执行注意点",
+  "action": "操作建议解读（≤170字）：分四部分写，先写今天做什么或不做什么，再写原因（1-2句），然后写执行细节（分批节奏、每次比例），最后写什么情况下触发下一步动作。每部分换行",
   "products": [
-    {"code": "产品编号", "advice": "该产品的操作建议（60-90字，可落地，结合费用与排名）"}
+    {"code": "产品编号", "advice": "该产品的操作建议（≤70字，可落地，结合费用与排名，不得提及其他产品）"}
   ],
   "product_news": "行业新闻板块（≤120字）：从要闻中挑选与客户持有产品行业相关的新闻，逐条解读对相关产品的影响",
-  "risk": "风险观察（≤70字）：最值得警惕的1-2个风险点"
+  "risks": ["风险1（≤45字）", "风险2（≤45字）", "风险3（≤45字）"]
 }"""
 
 
@@ -206,7 +207,9 @@ def insert_insights(report, insights, product_names=None):
     if product_advice:
         product_lines.append("")
         product_lines.append("## 产品操作建议")
-        for pa in product_advice:
+        for i, pa in enumerate(product_advice):
+            if i > 0:
+                product_lines.append("")
             pcode = pa.get("code", "")
             pname = product_names.get(pcode, "")
             label = f"{pcode} {pname}".strip()
@@ -216,16 +219,18 @@ def insert_insights(report, insights, product_names=None):
         product_lines.append("")
         product_lines.append("## 行业新闻解读")
         product_lines.append(f"> {insights['product_news'].strip()}")
-    used.add("product_news")
 
     # overview 置顶
     overview = (insights.get("overview") or "").strip()
-    risk = (insights.get("risk") or "").strip()
+    risks = insights.get("risks") or []
+    if not risks and insights.get("risk"):
+        risks = [str(insights["risk"])]
     tail = []
-    if risk:
+    if risks:
         tail.append("")
         tail.append("## 风险观察")
-        tail.append(f"> {risk}")
+        for i, r in enumerate(risks, 1):
+            tail.append(f"{i}. {str(r).strip()}")
 
     out = []
     if overview:
@@ -234,10 +239,12 @@ def insert_insights(report, insights, product_names=None):
         out.append("")
     if block_map.get("## 市场速览") is not None:
         out.append("## 市场速览" + block_map["## 市场速览"])
+        out.append("")
         del block_map["## 市场速览"]
     for title, body in block_map.items():
         if body.strip():
             out.append(title + body)
+            out.append("")
     out.extend(product_lines)
     out.extend(tail)
     out.append("")
