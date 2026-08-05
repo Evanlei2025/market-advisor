@@ -5,6 +5,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -14,6 +15,7 @@ import pandas as pd
 import requests
 
 import llm
+import rules
 import style
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -100,6 +102,14 @@ class DataFetcher:
         cutoff = pd.Timestamp(f"{datetime.now().year - PE_HIST_YEARS}-01-01")
         return df[df["date"] >= cutoff].dropna()
 
+    def pe_history_full(self, symbol):
+        """全历史 PE（用于口径敏感性提示）"""
+        df = self.ak.stock_index_pe_lg(symbol=symbol)
+        df = df[["日期", "滚动市盈率"]]
+        df.columns = ["date", "pe"]
+        df["date"] = pd.to_datetime(df["date"])
+        return df.dropna()
+
     def bond_rates(self):
         df = self.ak.bond_zh_us_rate()
         df = df[["日期", "中国国债收益率2年", "中国国债收益率10年"]].dropna()
@@ -107,6 +117,41 @@ class DataFetcher:
         df["date"] = pd.to_datetime(df["date"])
         cutoff = pd.Timestamp(f"{datetime.now().year - PE_HIST_YEARS}-01-01")
         return df[df["date"] >= cutoff]
+
+    def bond_rates_cn(self):
+        """备选源：新浪中债 10 年期国债收益率（英为财情失败时切换）"""
+        df = self.ak.bond_gb_zh_sina(symbol="中国10年期国债")
+        df = df[["date", "close"]].dropna()
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.rename(columns={"close": "y10"})
+        df["y2"] = float("nan")
+        cutoff = pd.Timestamp(f"{datetime.now().year - PE_HIST_YEARS}-01-01")
+        return df[df["date"] >= cutoff].reset_index(drop=True)
+
+    def fund_stock_position(self, fund_code):
+        """股票总仓位（天天基金官方季度资产配置，f_assetAllocation）"""
+        try:
+            r = self.session.get(f"https://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=20)
+            m = re.search(r"var f_assetAllocation = (\[.*?\]);", r.text)
+            if not m:
+                return 0.0
+            arr = json.loads(m.group(1))
+            if not arr:
+                return 0.0
+            return float(arr[-1][1]) / 100.0
+        except Exception:
+            return 0.0
+
+    def fund_bond_convertible(self, fund_code):
+        """转债仓位占比（季度持仓，债券名称含'转债'）"""
+        try:
+            df = self.ak.fund_portfolio_bond_hold_em(symbol=fund_code, date=str(datetime.now().year))
+            if df is None or df.empty or "占净值比例" not in df.columns:
+                return 0.0
+            mask = df["债券名称"].astype(str).str.contains("转债", na=False)
+            return float(df.loc[mask, "占净值比例"].sum()) / 100.0
+        except Exception:
+            return 0.0
 
     def gold_daily(self, days=320):
         df = self.ak.spot_hist_sge(symbol="Au99.99")
@@ -202,6 +247,15 @@ def fetch_section(fn, name):
     return None
 
 
+def fetch_once(fn, name):
+    """单次尝试（用于主备双源的主源，失败立即切备选）"""
+    try:
+        return fn()
+    except Exception as e:
+        log(f"[WARN] {name} 失败({type(e).__name__})，切换备选源")
+        return None
+
+
 def _fee_num(v):
     try:
         return float(str(v).replace("%", "").strip())
@@ -212,7 +266,7 @@ def _fee_num(v):
 TYPE_LABELS = {"bond": "债券型", "money": "现金管理", "equity": "权益型", "gold": "黄金型", "other": "理财"}
 
 
-def analyze_product(fetcher, p):
+def analyze_product(fetcher, p, cfg_ref):
     """单个理财产品分析：返回 (report_lines, ctx_dict)。失败不阻塞。"""
     code = p.get("code", "?")
     name = p.get("name") or ""
@@ -306,28 +360,50 @@ def analyze_product(fetcher, p):
     def pct(x, suffix="%"):
         return "—" if x is None else f"{x*100:+.1f}{suffix}"
 
-    # 规则信号（保守）
-    type_hint = {"gold": "黄金类，波动较大，建议分批", "equity": "权益类，波动较大，建议分批", "bond": ""}
-    if ptype == "money":
-        signal = "持有"
-        reason = "现金管理类产品，收益平稳"
-        if r1y is not None and r1y < 0.012:
-            reason = "收益偏低，可对比同类现金产品"
-    else:
-        if max_dd < -0.03 and not trend_up:
-            signal, reason = "观望", "近一年回撤超3%且趋势向下"
-        elif not trend_up and (r3m is not None and r3m < 0):
-            signal, reason = "关注", "短期趋势走弱"
-        else:
-            signal, reason = "持有", "趋势平稳"
-        if ptype in type_hint and type_hint[ptype]:
-            reason = reason + "；" + type_hint[ptype] if reason else type_hint[ptype]
-        if ptype == "bond":
-            mgmt_val = _fee_num(mgmt)
-            if mgmt_val is not None and mgmt_val > 0.4:
-                reason += "；管理费偏高需长期持有摊薄成本"
+    # ---- 穿透风险分类：权益暴露度 = 股票仓位 + 转债仓位×50% ----
+    equity_exposure = None
+    if ptype in ("bond", "equity", "gold"):
+        try:
+            stock_pos = fetch_section(lambda: fetcher.fund_stock_position(fcode), f"股票仓{fcode}")
+            conv_pos = fetch_section(lambda: fetcher.fund_bond_convertible(fcode), f"转债仓{fcode}")
+            conv_ratio = float(cfg_ref["rules"].get("convertible_exposure_ratio", 0.5))
+            if stock_pos is None:
+                stock_pos = 0.0
+            if conv_pos is None:
+                conv_pos = 0.0
+            equity_exposure = stock_pos + conv_pos * conv_ratio
+            if ptype == "equity" and stock_pos < 0.01:
+                equity_exposure = max(equity_exposure, 0.8)
+        except Exception:
+            equity_exposure = None
 
-    line1 = f"\n**{code} {fname}**（{TYPE_LABELS.get(ptype, ptype)}）"
+    stop_line = rules.stop_loss_level(cfg_ref, equity_exposure)
+    nav_series = nav.reset_index(drop=True)
+    action, action_reason = rules.product_action(
+        cfg_ref, p,
+        {"nav_series": nav_series, "equity_exposure": equity_exposure,
+         "nav_latest": float(n.iloc[-1])})
+
+    dd_from_high = float(n.iloc[-1] / n.max() - 1)
+
+    # 规则信号展示
+    action_label = {"sell_all": "止损清仓", "sell_half": "止盈减半", "hold": "持有"}.get(action, "持有")
+    if equity_exposure is not None:
+        exp_tag = "权益型" if equity_exposure >= 0.8 else ("混合偏债" if equity_exposure >= 0.2 else ("含转债" if equity_exposure >= 0.05 else "纯债"))
+        exp_str = f"权益暴露 {equity_exposure*100:.1f}%（{exp_tag}），止损线 {stop_line*100:.0f}%"
+    else:
+        exp_str = f"止损线 {stop_line*100:.0f}%"
+
+    # 动态类型标签（反映真实风险敞口）
+    if equity_exposure is not None:
+        type_label = "权益型" if equity_exposure >= 0.8 else ("混合偏债型" if equity_exposure >= 0.2 else ("含转债" if equity_exposure >= 0.05 else "债券型"))
+    else:
+        type_label = TYPE_LABELS.get(ptype, ptype)
+
+    signal = action_label
+    reason = action_reason
+
+    line1 = f"\n**{code} {fname}**（{type_label}）"
     line2 = f"- 净值 {nav_str}"
     line3 = f"- 区间收益："
     line4 = f"近1周 {pct(r1w)}"
@@ -335,7 +411,7 @@ def analyze_product(fetcher, p):
     line6 = f"近3月 {pct(r3m)}"
     line7 = f"近6月 {pct(r6m)}"
     line8 = f"近1年 {pct(r1y)}"
-    line9 = f"- 近1年最大回撤 {max_dd*100:.1f}%"
+    line9 = f"- 近1年最大回撤 {max_dd*100:.1f}%，距250日高点 {dd_from_high*100:.1f}%"
     line10 = "- " + "，".join(x for x in [f"同类排名 {ranking}" if ranking else "",
                                            f"规模 {scale}" if scale else "",
                                            f"成立 {inception}" if inception else "",
@@ -343,7 +419,8 @@ def analyze_product(fetcher, p):
     line11 = "- " + "，".join(x for x in [f"费用 {fees_str}" if fees_str else "",
                                            f"平台 {p.get('platform','')}" if p.get("platform") else "",
                                            f"备注 {p.get('notes','')}" if p.get("notes") else ""] if x)
-    line12 = f"- 规则信号：{signal}（{reason}）"
+    line12 = f"- {exp_str}"
+    line13 = f"- 规则指令：{signal}（{reason}）"
 
     ctx.update({
         "unavailable": False, "name": fname,
@@ -353,10 +430,16 @@ def analyze_product(fetcher, p):
         "ranking": ranking or "无",
         "scale": scale, "inception": inception, "manager": manager,
         "fees": fees_str or "无", "signal": f"{signal}（{reason}）",
+        "equity_exposure": equity_exposure,
+        "stop_line": stop_line,
+        "action": action,
+        "action_reason": action_reason,
+        "nav_series": nav_series,
+        "dd_from_high": dd_from_high,
     })
     # 区间收益细分行之间用空行分隔（markdown 普通行需空行才可靠换行）
     return ([line1, line2, line3, line4, "", line5, "", line6, "", line7, "", line8,
-             line9, line10, line11, line12], ctx)
+             line9, line10, line11, line12, line13], ctx)
 
 
 def main():
@@ -423,6 +506,13 @@ def main():
                 trend_tag = "站上" if last["close"] > ma120 else "跌破"
                 equity_detail.append(
                     f"{name}：PE 分位 {r*100:.0f}%（{pe_tag}），{trend_tag}120日均线，20日动量 {m20:+.1%}，单项分 {score:+.1f}")
+                # 策略引擎输入
+                if name == "沪深300":
+                    ctx["csi300_pe_pctile"] = float(r)
+                    ctx["csi300_mom20"] = float(m20)
+                elif name == "中证500":
+                    ctx["csi500_pe_pctile"] = float(r)
+                    ctx["csi500_mom20"] = float(m20)
 
     # 隔夜外盘（新浪源）
     us = fetch_section(fetcher.us_index, "标普500")
@@ -436,6 +526,7 @@ def main():
     L("")
     L(f"## 估值温度 (近{PE_HIST_YEARS}年分位)")
     val_lines = []
+    pe_full_cache = {}
     for name in pe_indexes:
         pe = fetch_section(lambda s=name: fetcher.pe_history(s), f"{name}PE")
         if pe is None or pe.empty:
@@ -447,7 +538,15 @@ def main():
             val_lines.append(f"- {name}: 无数据")
             continue
         tag = "低估" if r < 0.3 else ("合理" if r <= 0.7 else "偏高")
-        val_lines.append(f"- {name}: PE {last_pe:.2f}，分位 {r*100:.0f}%（{tag}）")
+        # 全历史口径敏感性（专家要求）
+        pe_full = fetch_section(lambda s=name: fetcher.pe_history_full(s), f"{name}PE全史")
+        sens = ""
+        if pe_full is not None and not pe_full.empty:
+            r_full = pct_rank(pe_full["pe"], last_pe)
+            if r_full is not None:
+                pe_full_cache[name] = pe_full
+                sens = f"（全历史分位 {r_full*100:.0f}%）"
+        val_lines.append(f"- {name}: PE {last_pe:.2f}，近{PE_HIST_YEARS}年分位 {r*100:.0f}%（{tag}）{sens}")
     # 全市场 PE（乐咕，上证）
     mpe = fetch_section(fetcher.market_pe, "全市场PE")
     if mpe is not None and not mpe.empty:
@@ -457,18 +556,49 @@ def main():
     ctx["valuation"] = dict((l.split(":")[0].strip(), l.split(":", 1)[1].strip())
                             for l in val_lines if ":" in l)
 
-    # 债券
+    # 股债性价比：E/P(沪深300) − 10Y 国债，近5年分位
+    ep_ctx = {}
+    pe_full = pe_full_cache.get("沪深300")
+    bond_for_ep = fetch_once(fetcher.bond_rates, "国债收益率(EP)")
+    bond_ep_src = "英为"
+    if bond_for_ep is None or bond_for_ep.empty:
+        bond_for_ep = fetch_section(fetcher.bond_rates_cn, "中债收益率(EP)")
+        bond_ep_src = "新浪中债"
+    if pe_full is not None and not pe_full.empty and bond_for_ep is not None and not bond_for_ep.empty:
+        try:
+            ep_years = cfg.get("rules", {}).get("ep_premium_years", 5)
+            ep_cutoff = pd.Timestamp(f"{datetime.now().year - ep_years}-01-01")
+            pe_ep = pe_full[pe_full["date"] >= ep_cutoff]
+            b_ep = bond_for_ep[bond_for_ep["date"] >= ep_cutoff]
+            merged = pd.merge(pe_ep, b_ep[["date", "y10"]], on="date", how="inner").dropna()
+            if len(merged) > 60:
+                merged["ep"] = 1.0 / merged["pe"] - merged["y10"] / 100.0
+                cur_ep = float(merged["ep"].iloc[-1])
+                cur_y10 = float(merged["y10"].iloc[-1])
+                ep_r = pct_rank(merged["ep"], cur_ep)
+                ep_ctx = {"ep": cur_ep, "y10": cur_y10, "pctile": ep_r,
+                          "label": f"盈利收益率 1/PE = {1.0/float(pe_full['pe'].iloc[-1])*100:.2f}% − 10年国债 {cur_y10:.2f}% = {cur_ep*100:+.2f}%，{ep_years}年分位 {ep_r*100:.0f}%"}
+                ctx["ep_premium_pctile"] = float(ep_r)
+        except Exception as e:
+            log(f"[WARN] 股债性价比计算失败: {e}")
+    ctx["ep"] = ep_ctx
+
+    # 债券（双源：英为财情单次尝试 → 新浪中债备选）
     bond_ctx = {}
     L("")
     L(f"## 债市与利率")
-    bond = fetch_section(fetcher.bond_rates, "国债收益率")
+    bond = fetch_once(fetcher.bond_rates, "国债收益率(英为)")
+    bond_src = "英为财情"
+    if bond is None or bond.empty:
+        bond = fetch_section(fetcher.bond_rates_cn, "中债收益率")
+        bond_src = "新浪中债"
     bond_sig = None
     if bond is not None and not bond.empty:
         y10 = bond.iloc[-1]["y10"]
         y2 = bond.iloc[-1]["y2"]
         r = pct_rank(bond["y10"], y10)
         spread = y10 - y2
-        L(f"- 中国10年期国债: {y10:.2f}%，分位 {r*100:.0f}%")
+        L(f"- 中国10年期国债: {y10:.2f}%，分位 {r*100:.0f}%（{bond_src}）")
         bond_ctx["10年期国债"] = f"{y10:.2f}%，分位 {r*100:.0f}%"
         L(f"- 期限利差(10Y-2Y): {spread:+.2f}%{'（倒挂，警惕）' if spread < 0 else ''}")
         bond_ctx["期限利差(10Y-2Y)"] = f"{spread:+.2f}%{'（倒挂）' if spread < 0 else ''}"
@@ -563,14 +693,19 @@ def main():
     # ---------- 4.7 理财产品分析 ----------
     products = cfg.get("products", [])
     product_ctxs = []
+    returns_map = {}
+    weights_map = {}
     if products:
         L("")
         L(f"## 理财产品跟踪")
         for p in products:
-            plines, pctx = analyze_product(fetcher, p)
+            plines, pctx = analyze_product(fetcher, p, cfg)
             for ln in plines:
                 L(ln)
             product_ctxs.append(pctx)
+            nav_s = pctx.get("nav_series")
+            if nav_s is not None and len(nav_s) > 30:
+                returns_map[p["code"]] = nav_s["nav"].pct_change().dropna()
     ctx["products"] = product_ctxs
 
     # ---------- 5. 组合检查 ----------
@@ -578,95 +713,133 @@ def main():
     L(f"## 组合检查")
     holdings = cfg["holdings"]
     target = cfg["target"]
-    band = cfg["rebalance_band"]
     total = sum(h["amount"] for h in holdings)
     actual = {}
-    tx_codes = []
-    for h in holdings:
-        code = h.get("code")
-        if code:
-            tx_codes.append("sh" + code if code.startswith("5") else "sz" + code)
-    spot_map = {}
-    if tx_codes:
-        rt = fetch_section(lambda: fetcher.realtime_quotes(tx_codes), "持仓行情")
-        if rt:
-            for h in holdings:
-                code = h.get("code")
-                if code:
-                    key = "sh" + code if code.startswith("5") else "sz" + code
-                    if key in rt:
-                        spot_map[code] = rt[key]["pct"]
     for h in holdings:
         t = h["type"]
         actual[t] = actual.get(t, 0) + h["amount"]
     classes = [("equity", "权益"), ("bond", "债券"), ("gold", "黄金"), ("cash", "现金")]
+    rebal_lines = []
+    mv_lines = []
+    actions = []
+    order_lines = []
+    diag_lines = []
+    orders = []
+    summary_lines = []
+    target_alloc = {}
+    rule_triggers = []
+
+    # ---- 今日跟投指令（规则引擎，确定性） ----
+    L("")
+    L(f"## 今日跟投指令")
     if total <= 0:
-        L(f"- 总资产: 未填写（holdings 金额均为 0）")
-        L(f"- 请填入真实持仓金额后，这里将显示仓位比例与再平衡建议")
-        rebal_lines = []
-        mv_lines = []
-        actions = []
+        L(f"- 标准组合持仓金额未填写，暂无法生成指令")
+        L(f"- 请填写 holdings 金额后，此处将输出可执行的买卖清单")
     else:
+        L(f"- 标准跟随组合（总资产 ¥{total:,.0f}，跟投份数 {cfg.get('portfolio', {}).get('follow_units', 1)}）")
+        # 产品 ctx 索引
+        pctx_map = {p.get("code", ""): p for p in product_ctxs}
+        # 组合权重（用于诊断）
+        for h in holdings:
+            key = h.get("fund_code") or h.get("code")
+            if key and key in returns_map and total > 0:
+                weights_map[key] = h["amount"] / total
+        # 权益目标仓位（最保守原则 + 股债性价比）
+        eq_target, rule_triggers = rules.equity_target(cfg, ctx)
+        # 持仓金额映射（按 fund_code）
+        holdings_amt = {}
+        nav_map = {}
+        name_map = {}
+        for h in holdings:
+            key = h.get("fund_code") or h.get("code")
+            if key:
+                holdings_amt[key] = h["amount"]
+                name_map[key] = h["name"]
+        for p in products:
+            fcode = p.get("fund_code", "")
+            if fcode and fcode in pctx_map:
+                ns = pctx_map[fcode].get("nav_series")
+                if ns is not None and not ns.empty:
+                    nav_map[fcode] = float(ns["nav"].iloc[-1])
+        orders, target_alloc, summary_lines = rules.build_order_book(
+            cfg, products,
+            {"equity_target": eq_target, "holdings_amount": holdings_amt, "nav": nav_map,
+             "product_name": name_map,
+             "equity_exposure": {fcode: pctx_map[fcode].get("equity_exposure") for fcode in pctx_map},
+             "product_ctx": {fcode: pctx_map[fcode] for fcode in pctx_map},
+             "total": total})
+        if orders:
+            for o in orders:
+                sh = f"，赎回 {o['shares']:,.2f} 份（估）" if o["side"] == "卖出" and o.get("shares") else ""
+                L(f"- {o['side']}：{o['code']} {o['name']}，{o['amount']:,.0f} 元{sh}")
+                L(f"  原因：{o['reason']}")
+        else:
+            L(f"- 无操作，维持当前持仓（今日无任何规则触发）")
+        L("")
+        L(f"- 调仓后目标仓位：权益 {target_alloc.get('equity', 0)*100:.0f}% / 固收 {target_alloc.get('bond', 0)*100:.0f}% / 现金 {target_alloc.get('cash', 0)*100:.0f}%")
+        for s in summary_lines:
+            L(f"{s}")
+        L(f"- 执行窗口：今日 15:00 前；份额为估值（基于 T-1 净值），实际以基金公司确认份额为准")
+        ob = []
+        for o in orders:
+            ob.append(f"{o['side']} {o['code']} {o['name']} {o['amount']:,.0f}元（{o['reason']}）")
+        ctx["order_book"] = "\n".join(ob) if ob else "无操作，维持当前持仓"
+        ctx["target_alloc"] = f"权益 {target_alloc.get('equity',0)*100:.0f}% / 固收 {target_alloc.get('bond',0)*100:.0f}% / 现金 {target_alloc.get('cash',0)*100:.0f}%"
+
+        # ---- 组合诊断 ----
+        diag = rules.portfolio_diagnostics(
+            cfg, products,
+            {"returns": returns_map, "weights": weights_map})
+        if diag:
+            L("")
+            L(f"## 组合诊断")
+            L(f"- 年化波动率 {diag['vol']*100:.1f}%")
+            L(f"- 250日最大回撤 {diag['max_dd']*100:.1f}%")
+            L(f"- 日度 VaR95 {diag['var95']*100:.2f}%（历史分位法）")
+            # 实际权益暴露度（转债按 50% 折算）
+            total_exp = 0.0
+            for p in products:
+                fcode = p.get("fund_code", "")
+                if fcode in weights_map and fcode in pctx_map:
+                    exp = pctx_map[fcode].get("equity_exposure") or 0.0
+                    total_exp += weights_map[fcode] * exp
+            L(f"- 经转债折算后，组合实际权益暴露度 {total_exp*100:.1f}%")
+            ctx["diagnostics"] = (f"波动率 {diag['vol']*100:.1f}%，最大回撤 {diag['max_dd']*100:.1f}%，"
+                                  f"VaR95 {diag['var95']*100:.2f}%，实际权益暴露 {total_exp*100:.1f}%")
+
+        # ---- 决策依据（规则触发明细） ----
+        L("")
+        L(f"## 决策依据（今日触发的规则）")
+        ep = ctx.get("ep", {})
+        if ep:
+            L(f"- 股债性价比：{ep.get('label', '')}")
+        if rule_triggers:
+            for tr in rule_triggers:
+                L(f"- {tr}")
+        else:
+            L(f"- 无阶梯规则触发，权益维持目标 {target.get('equity', 0.4)*100:.0f}%")
+        L(f"- 止损/止盈状态见理财产品跟踪的规则指令行")
+        ctx["decision_basis"] = "\n".join((["股债性价比：" + ep.get("label", "")] if ep else []) + rule_triggers)
+
+    # 组合检查明细（原再平衡逻辑保留为仓位展示）
+    if total > 0:
+        L("")
+        L(f"## 组合检查")
         L(f"- 总资产: ¥{total:,.0f}")
         for t, label in classes:
             if t in actual:
                 L(f"- {label}: ¥{actual[t]:,.0f}（{actual[t]/total*100:.0f}%）")
-        # 现金并入债券视为固收
-        def class_share(t):
-            amt = actual.get(t, 0)
-            if t == "bond":
-                amt += actual.get("cash", 0)
-            return amt / total
 
-        actions = []
-        rebal_lines = []
-        for t, label in classes:
-            if t not in target:
-                continue
-            share = class_share(t)
-            diff = share - target[t]
-            if abs(diff) >= band:
-                amt = int(round(abs(diff) * total / 100) * 100)
-                if diff > 0:
-                    actions.append((t, "减", amt))
-                    rebal_lines.append(f"- {label}超配 {diff*100:.0f}pp → 卖出/转出约 ¥{amt:,.0f} → 资金转入低配类别")
-                else:
-                    actions.append((t, "增", amt))
-                    rebal_lines.append(f"- {label}低配 {abs(diff)*100:.0f}pp → 买入/转入约 ¥{amt:,.0f}，建议分2-3周执行")
-            else:
-                rebal_lines.append(f"- {label} {diff*100:+.1f}pp，在阈值内 → 无需操作")
-        L("\n".join(rebal_lines))
-
-        # 持仓今日估算（场内ETF用实时，场外基金用昨日净值）
-        mv_lines = []
-        for h in holdings:
-            if h.get("code") in spot_map:
-                mv_lines.append(f"- {h['name']}: 今日{spot_map[h['code']]:+.2f}%")
-            elif h.get("fund_code"):
-                fh = fetch_section(lambda c=h["fund_code"]: fetcher.fund_daily(c), f"净值{h['fund_code']}")
-                if fh is not None and not fh.empty:
-                    last_row = fh.iloc[-1]
-                    g = float(last_row["日增长率"]) if pd_isna(last_row["日增长率"]) == False else 0.0
-                    mv_lines.append(f"- {h['name']}: 最新净值 {last_row['单位净值']:.4f}（{last_row['净值日期']}，{g:+.2f}%）")
-        if mv_lines:
-            L("")
-            L(f"持仓最新表现")
-            L("\n".join(mv_lines))
-
-    # ---------- 6. 总体建议 ----------
+    # ---------- 6. 操作建议（AI 解读指令区，规则已在上方输出） ----------
     L("")
-    L(f"## 今日操作建议")
+    L(f"## 今日操作建议（解读）")
     eq = None
     if equity_stances:
         avg = sum(equity_stances) / len(equity_stances)
         eq = stance_label(avg)
-        L(f"- 权益：{eq}（综合分 {avg:+.1f}，由以下指数打分平均而来）")
+        L(f"- 权益：{eq}（综合分 {avg:+.1f}）")
         for d in equity_detail:
             L(f"  - {d}")
-        if eq in ("增配", "略增") and actions and any(a[0] == "equity" and a[1] == "增" for a in actions):
-            L(f"- 权益低配 + 估值合理 → 按上面再平衡金额分批买入")
-        if eq in ("减配", "略减") and actions and any(a[0] == "equity" and a[1] == "减" for a in actions):
-            L(f"- 权益超配 + 信号转弱 → 优先执行再平衡卖出")
     if bond_sig is not None:
         bs = stance_label(bond_sig)
         L(f"- 债券：{bs}")
@@ -678,10 +851,8 @@ def main():
         L(f"- 黄金：{stance_label(gold_sig)}（卫星仓，维持 {cfg['target'].get('gold', 0.1)*100:.0f}% 以内）")
         if gold is not None and not gold.empty:
             L(f"  - {trend}趋势，20日动量 {m20:+.1%}" + (" → 暂不加仓" if trend == "空头" else " → 可持有"))
-    if not actions and (not equity_stances or abs(sum(equity_stances)/len(equity_stances)) < 0.3):
-        L(f"- 组合在目标区间内，市场信号中性 → 今天不需要任何操作")
-    elif actions:
-        L(f"- 组合偏离触发再平衡 → 按上面金额分批执行，每批间隔 1 周")
+    if not orders and (not equity_stances or abs(sum(equity_stances)/len(equity_stances)) < 0.3):
+        L(f"- 今日无规则触发 → 唯一操作就是不操作")
 
     ctx["signal_equity"] = eq or "无数据"
     ctx["rebalance"] = "\n".join(rebal_lines) if rebal_lines else "无"
@@ -690,7 +861,7 @@ def main():
     L("")
     L(f"---")
     L(f"*本报告由本地程序按固定规则自动生成，仅供参考，不构成投资建议。*")
-    L(f"*买卖请手动执行；每次交易后请更新 config.json 中对应持仓金额。*")
+    L(f"*买卖请手动执行；指令基于 T-1 日净值估算，实际成交偏差通常在 ±0.3% 以内，以 App 确认值为准。*")
 
     report = "\n".join(lines)
     title = f"每日投顾报告 {today}"
