@@ -326,16 +326,17 @@ def analyze_product(fetcher, p):
 
     line1 = f"- **{code} {fname}**（{ptype}类）"
     line2 = f"  净值 {nav_str}"
-    line3 = f"  区间收益：近1周{pct(r1w)} 近1月{pct(r1m)} 近3月{pct(r3m)}"
-    line4 = f"  近6月{pct(r6m)} 近1年{pct(r1y)} 近1年回撤 {max_dd*100:.1f}%"
-    line5 = "  " + "；".join(x for x in [f"同类排名 {ranking}" if ranking else "",
+    line3 = f"  区间收益：近1周{pct(r1w)} 近1月{pct(r1m)}"
+    line4 = f"  近3月{pct(r3m)} 近6月{pct(r6m)}"
+    line5 = f"  近1年{pct(r1y)} 近1年回撤 {max_dd*100:.1f}%"
+    line6 = "  " + "；".join(x for x in [f"同类排名 {ranking}" if ranking else "",
                                           f"规模 {scale}" if scale else "",
                                           f"成立 {inception}" if inception else "",
                                           f"经理 {manager}" if manager else ""] if x)
-    line6 = "  " + "；".join(x for x in [f"费用 {fees_str}" if fees_str else "",
+    line7 = "  " + "；".join(x for x in [f"费用 {fees_str}" if fees_str else "",
                                           f"平台 {p.get('platform','')}" if p.get("platform") else "",
                                           f"备注 {p.get('notes','')}" if p.get("notes") else ""] if x)
-    line7 = f"  规则信号: {signal}（{reason}）"
+    line8 = f"  规则信号: {signal}（{reason}）"
 
     ctx.update({
         "unavailable": False, "name": fname,
@@ -346,7 +347,7 @@ def analyze_product(fetcher, p):
         "scale": scale, "inception": inception, "manager": manager,
         "fees": fees_str or "无", "signal": f"{signal}（{reason}）",
     })
-    return ([line1, line2, line3, line4, line5, line6, line7], ctx)
+    return ([line1, line2, line3, line4, line5, line6, line7, line8], ctx)
 
 
 def main():
