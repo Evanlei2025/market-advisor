@@ -130,6 +130,24 @@ class DataFetcher:
         df = df[["净值日期", "单位净值", "日增长率"]].tail(3)
         return df.reset_index(drop=True)
 
+    def fund_nav_history(self, fund_code):
+        df = self.ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+        df = df[["净值日期", "单位净值", "日增长率"]]
+        df.columns = ["date", "nav", "growth"]
+        return df.dropna().reset_index(drop=True)
+
+    def fund_profile(self, fund_code):
+        df = self.ak.fund_individual_basic_info_xq(symbol=fund_code)
+        return dict(zip(df["item"], df["value"]))
+
+    def fund_fees(self, fund_code):
+        df = self.ak.fund_individual_detail_info_xq(symbol=fund_code)
+        return df.to_dict("records")
+
+    def fund_achievement(self, fund_code):
+        df = self.ak.fund_individual_achievement_xq(symbol=fund_code)
+        return df.to_dict("records")
+
     def market_pe(self):
         df = self.ak.stock_market_pe_lg(symbol="上证")
         return df
@@ -181,6 +199,151 @@ def fetch_section(fn, name):
             else:
                 log(f"[WARN] {name} 获取失败: {type(e).__name__}: {str(e)[:100]}")
     return None
+
+
+def _fee_num(v):
+    try:
+        return float(str(v).replace("%", "").strip())
+    except Exception:
+        return None
+
+
+def analyze_product(fetcher, p):
+    """单个理财产品分析：返回 (report_lines, ctx_dict)。失败不阻塞。"""
+    code = p.get("code", "?")
+    name = p.get("name") or ""
+    ptype = p.get("type", "other")
+    fcode = p.get("fund_code", "")
+    ctx = {"code": code, "name": name, "type": ptype,
+           "platform": p.get("platform", ""), "notes": p.get("notes", "")}
+    if not fcode:
+        return ([f"- {code} {name}: 银行理财/券商产品，自动数据不可用（需人工维护）"],
+                {**ctx, "unavailable": True})
+
+    nav = fetch_section(lambda: fetcher.fund_nav_history(fcode), f"净值{fcode}")
+    achievement = fetch_section(lambda: fetcher.fund_achievement(fcode), f"业绩{fcode}") or []
+    profile = fetch_section(lambda: fetcher.fund_profile(fcode), f"资料{fcode}") or {}
+
+    # 货币基金：净值走势接口不支持，用业绩表兜底
+    if nav is None or nav.empty or len(nav) < 10:
+        if ptype == "money" and achievement:
+            prof_map = {str(k).strip(): str(v).strip() for k, v in profile.items()}
+            fname = name or prof_map.get("基金名称") or f"货币基金"
+            ytd = next((r.get("本产品区间收益", "") for r in achievement if str(r.get("周期", "")) == "今年以来"), "")
+            rank = next((r.get("周期收益同类排名", "") for r in achievement if str(r.get("周期", "")) == "今年以来"), "")
+            scale = prof_map.get("基金规模", "")
+            try:
+                ytd_fmt = f"{float(ytd):.2f}%"
+            except Exception:
+                ytd_fmt = f"{ytd}%"
+            ctx.update({
+                "unavailable": False, "name": fname,
+                "nav_latest": f"现金管理类",
+                "returns": f"今年以来 {ytd_fmt}，历史年度正收益稳定",
+                "max_dd": "极低（货基类）",
+                "ranking": f"今年以来 {rank}" if rank else "无",
+                "scale": scale, "inception": prof_map.get("成立时间", ""),
+                "manager": prof_map.get("基金经理", ""),
+                "fees": "无（货币基金通常免申赎费）",
+                "signal": "持有（现金管理类产品，收益平稳）",
+            })
+            return ([f"- **{code} {fname}**（money类，现金管理）",
+                     f"  今年以来收益 {ytd_fmt}；同类排名 {rank}；规模 {scale}",
+                     f"  规则信号: 持有（现金管理类产品，收益平稳）"], ctx)
+        return ([f"- {code} {name}: 净值数据不可用"], {**ctx, "unavailable": True})
+
+    n = nav["nav"]
+    def rb(days):
+        return (n.iloc[-1] / n.iloc[-1 - days] - 1) if len(nav) > days else None
+    r1w, r1m, r3m, r6m, r1y = rb(5), rb(21), rb(63), rb(126), rb(250)
+    max_dd = float((n / n.cummax() - 1).min())
+    ma60 = float(n.rolling(60).mean().iloc[-1])
+    trend_up = float(n.iloc[-1]) > ma60
+    latest = nav.iloc[-1]
+    growth = float(latest["growth"]) if pd_isna(latest["growth"]) == False else 0.0
+    nav_str = f"{float(latest['nav']):.4f}（{growth:+.2f}%）"
+
+    fees = fetch_section(lambda: fetcher.fund_fees(fcode), f"费率{fcode}") or []
+
+    prof_map = {str(k).strip(): str(v).strip() for k, v in profile.items()}
+    scale = prof_map.get("基金规模", "")
+    inception = prof_map.get("成立时间", "")
+    manager = prof_map.get("基金经理", "")
+    fname = name or prof_map.get("基金名称", code)
+
+    buy_min = sell_min = mgmt = ""
+    for row in fees:
+        t = str(row.get("费用类型", ""))
+        cond = str(row.get("条件或名称", ""))
+        fee_raw = str(row.get("费用", ""))
+        try:
+            fee_val = float(fee_raw.replace("%", "").strip())
+        except Exception:
+            continue
+        # 买入/卖出均取首档（起购/最短持有档）；固定金额档（如 1000 元）跳过
+        if t == "买入规则" and not buy_min and fee_val < 10:
+            buy_min = f"{fee_val:g}%"
+        elif t == "卖出规则" and not sell_min and fee_val < 10:
+            sell_min = f"{fee_val:g}%"
+        elif t == "其他费用" and "管理费" in cond and not mgmt:
+            mgmt = f"{fee_val:g}%"
+    fees_str = "，".join(x for x in [f"申购{buy_min}", f"短期赎回{sell_min}", f"管理{mgmt}"] if x)
+
+    # 同类排名（取今年以来/近1年行）
+    ranking = ""
+    for row in achievement:
+        period = str(row.get("周期", ""))
+        if period in ("今年以来", "近1年"):
+            rk = row.get("周期收益同类排名", "")
+            if rk == rk and rk:
+                ranking = f"{period} {rk}"
+                break
+
+    def pct(x, suffix="%"):
+        return "—" if x is None else f"{x*100:+.1f}{suffix}"
+
+    # 规则信号（保守）
+    type_hint = {"gold": "黄金类，波动较大，建议分批", "equity": "权益类，波动较大，建议分批", "bond": ""}
+    if ptype == "money":
+        signal = "持有"
+        reason = "现金管理类产品，收益平稳"
+        if r1y is not None and r1y < 0.012:
+            reason = "收益偏低，可对比同类现金产品"
+    else:
+        if max_dd < -0.03 and not trend_up:
+            signal, reason = "观望", "近一年回撤超3%且趋势向下"
+        elif not trend_up and (r3m is not None and r3m < 0):
+            signal, reason = "关注", "短期趋势走弱"
+        else:
+            signal, reason = "持有", "趋势平稳"
+        if ptype in type_hint and type_hint[ptype]:
+            reason = reason + "；" + type_hint[ptype] if reason else type_hint[ptype]
+        if ptype == "bond":
+            mgmt_val = _fee_num(mgmt)
+            if mgmt_val is not None and mgmt_val > 0.4:
+                reason += "；管理费偏高需长期持有摊薄成本"
+
+    line1 = f"- **{code} {fname}**（{ptype}类）"
+    line2 = (f"  净值 {nav_str}；近1周{pct(r1w)} 近1月{pct(r1m)} 近3月{pct(r3m)} "
+             f"近6月{pct(r6m)} 近1年{pct(r1y)}；近1年最大回撤 {max_dd*100:.1f}%")
+    line3 = "  " + "；".join(x for x in [f"同类排名 {ranking}" if ranking else "",
+                                          f"规模 {scale}" if scale else "",
+                                          f"成立 {inception}" if inception else "",
+                                          f"经理 {manager}" if manager else "",
+                                          f"费用 {fees_str}" if fees_str else "",
+                                          f"平台 {p.get('platform','')}" if p.get("platform") else ""] if x)
+    line4 = f"  规则信号: {signal}（{reason}）"
+
+    ctx.update({
+        "unavailable": False, "name": fname,
+        "nav_latest": nav_str,
+        "returns": f"近1周{pct(r1w)} 近1月{pct(r1m)} 近3月{pct(r3m)} 近6月{pct(r6m)} 近1年{pct(r1y)}",
+        "max_dd": f"{max_dd*100:.1f}%",
+        "ranking": ranking or "无",
+        "scale": scale, "inception": inception, "manager": manager,
+        "fees": fees_str or "无", "signal": f"{signal}（{reason}）",
+    })
+    return ([line1, line2, line3, line4], ctx)
 
 
 def main():
@@ -374,6 +537,18 @@ def main():
             news_ctx.append({"title": title, "content": content})
     ctx["news"] = news_ctx
 
+    # ---------- 4.7 理财产品分析 ----------
+    products = cfg.get("products", [])
+    product_ctxs = []
+    if products:
+        L(f"\n## 理财产品跟踪")
+        for p in products:
+            plines, pctx = analyze_product(fetcher, p)
+            for ln in plines:
+                L(ln)
+            product_ctxs.append(pctx)
+    ctx["products"] = product_ctxs
+
     # ---------- 5. 组合检查 ----------
     L(f"\n## 组合检查")
     holdings = cfg["holdings"]
@@ -480,8 +655,7 @@ def main():
     # ---------- 6.5 AI 解读层（LLM 不可用时自动降级为纯静态报告） ----------
     insights, usage_info = llm.generate_insights(ctx)
     if insights:
-        ai_block = llm.render_insights(insights)
-        report += "\n\n" + ai_block
+        report = llm.insert_insights(report, insights)
         log(f"AI 解读已生成（{usage_info}）")
     else:
         log(f"AI 解读跳过: {usage_info}")

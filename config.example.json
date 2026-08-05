@@ -10,6 +10,11 @@
     "gold": 0.1
   },
   "rebalance_band": 0.05,
+  "products": [
+    { "code": "P001", "name": "", "type": "bond", "fund_code": "003358", "platform": "", "notes": "" },
+    { "code": "P002", "name": "", "type": "money", "fund_code": "000198", "platform": "", "notes": "" },
+    { "code": "P003", "name": "", "type": "gold", "fund_code": "000217", "platform": "", "notes": "" }
+  ],
   "holdings": [
     { "name": "沪深300ETF(510300)", "code": "510300", "type": "equity", "amount": 50000 },
     { "name": "中证红利ETF(515080)", "code": "515080", "type": "equity", "amount": 30000 },
