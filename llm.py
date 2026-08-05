@@ -8,8 +8,16 @@ import os
 
 import requests
 
-API_URL = "https://api.deepseek.com/chat/completions"
-MODEL = "deepseek-chat"
+DEFAULT_BASE_URL = "https://api.deepseek.com/chat/completions"
+DEFAULT_MODEL = "deepseek-chat"  # DeepSeek 性价比主力模型别名（当前映射 deepseek-v4-flash）
+
+
+def _base_url():
+    return os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+
+
+def _model():
+    return os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
 SYSTEM_PROMPT = """你是一位资深的买方资产配置分析师，服务对象是偏稳健的个人投资者（股债平衡型配置：权益45%、债券45%、黄金10%）。
 
@@ -86,7 +94,7 @@ def build_user_prompt(ctx):
 
 def call_deepseek(api_key, user_prompt, timeout=120):
     payload = {
-        "model": MODEL,
+        "model": _model(),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -96,7 +104,7 @@ def call_deepseek(api_key, user_prompt, timeout=120):
         "response_format": {"type": "json_object"},
     }
     r = requests.post(
-        API_URL,
+        _base_url(),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=timeout,
