@@ -178,8 +178,9 @@ SECTION_KEYS = [
 ]
 
 
-def insert_insights(report, insights):
+def insert_insights(report, insights, product_names=None):
     """把 AI 解读插入对应静态板块末尾；无对应板块的字段追加到报告末尾"""
+    product_names = product_names or {}
     sections = re.split(r"(?m)^(## [^\n]+)$", report)
     block_map = {}
     for i in range(1, len(sections), 2):
@@ -206,7 +207,10 @@ def insert_insights(report, insights):
         product_lines.append("")
         product_lines.append("## 产品操作建议")
         for pa in product_advice:
-            product_lines.append(f"**{pa.get('code', '')}**")
+            pcode = pa.get("code", "")
+            pname = product_names.get(pcode, "")
+            label = f"{pcode} {pname}".strip()
+            product_lines.append(f"**{label}**")
             product_lines.append(f"> {pa.get('advice', '')}")
     if insights.get("product_news"):
         product_lines.append("")

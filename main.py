@@ -209,6 +209,9 @@ def _fee_num(v):
         return None
 
 
+TYPE_LABELS = {"bond": "债券型", "money": "现金管理", "equity": "权益型", "gold": "黄金型", "other": "理财"}
+
+
 def analyze_product(fetcher, p):
     """单个理财产品分析：返回 (report_lines, ctx_dict)。失败不阻塞。"""
     code = p.get("code", "?")
@@ -248,9 +251,9 @@ def analyze_product(fetcher, p):
                 "fees": "无（货币基金通常免申赎费）",
                 "signal": "持有（现金管理类产品，收益平稳）",
             })
-            return ([f"- **{code} {fname}**（money类，现金管理）",
-                     f"  今年以来收益 {ytd_fmt}；同类排名 {rank}；规模 {scale}",
-                     f"  规则信号: 持有（现金管理类产品，收益平稳）"], ctx)
+            return ([f"\n**{code} {fname}**（现金管理）",
+                     f"- 今年以来收益 {ytd_fmt}，同类排名 {rank}" + (f"，规模 {scale}" if scale else ""),
+                     f"- 规则信号：持有（现金管理类产品，收益平稳）"], ctx)
         return ([f"- {code} {name}: 净值数据不可用"], {**ctx, "unavailable": True})
 
     n = nav["nav"]
@@ -324,19 +327,19 @@ def analyze_product(fetcher, p):
             if mgmt_val is not None and mgmt_val > 0.4:
                 reason += "；管理费偏高需长期持有摊薄成本"
 
-    line1 = f"- **{code} {fname}**（{ptype}类）"
-    line2 = f"  净值 {nav_str}"
-    line3 = f"  区间收益：近1周{pct(r1w)} 近1月{pct(r1m)}"
-    line4 = f"  近3月{pct(r3m)} 近6月{pct(r6m)}"
-    line5 = f"  近1年{pct(r1y)} 近1年回撤 {max_dd*100:.1f}%"
-    line6 = "  " + "；".join(x for x in [f"同类排名 {ranking}" if ranking else "",
+    line1 = f"\n**{code} {fname}**（{TYPE_LABELS.get(ptype, ptype)}）"
+    line2 = f"- 净值 {nav_str}"
+    line3 = f"- 区间收益：近1周 {pct(r1w)}，近1月 {pct(r1m)}"
+    line4 = f"- 近3月 {pct(r3m)}，近6月 {pct(r6m)}"
+    line5 = f"- 近1年 {pct(r1y)}，近1年最大回撤 {max_dd*100:.1f}%"
+    line6 = "- " + "，".join(x for x in [f"同类排名 {ranking}" if ranking else "",
                                           f"规模 {scale}" if scale else "",
                                           f"成立 {inception}" if inception else "",
                                           f"经理 {manager}" if manager else ""] if x)
-    line7 = "  " + "；".join(x for x in [f"费用 {fees_str}" if fees_str else "",
+    line7 = "- " + "，".join(x for x in [f"费用 {fees_str}" if fees_str else "",
                                           f"平台 {p.get('platform','')}" if p.get("platform") else "",
                                           f"备注 {p.get('notes','')}" if p.get("notes") else ""] if x)
-    line8 = f"  规则信号: {signal}（{reason}）"
+    line8 = f"- 规则信号：{signal}（{reason}）"
 
     ctx.update({
         "unavailable": False, "name": fname,
@@ -659,7 +662,8 @@ def main():
     # ---------- 6.5 AI 解读层（LLM 不可用时自动降级为纯静态报告） ----------
     insights, usage_info = llm.generate_insights(ctx)
     if insights:
-        report = llm.insert_insights(report, insights)
+        pnames = {p.get("code", ""): p.get("name", "") for p in products}
+        report = llm.insert_insights(report, insights, pnames)
         log(f"AI 解读已生成（{usage_info}）")
     else:
         log(f"AI 解读跳过: {usage_info}")
