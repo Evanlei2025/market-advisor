@@ -1,29 +1,24 @@
 # -*- coding: utf-8 -*-
-"""报告样式：银行 App 界面风格（招行红 + 白底高对比），适用于 Server酱（支持 HTML）"""
-
-BANK_RED = "#C3272B"
-BANK_DARK = "#3D3D3D"
-BANK_GRAY = "#757575"
-BANK_GREEN = "#00875A"
+"""报告样式：纯 Markdown 美化（Server酱微信通道只支持 Markdown，不支持 HTML）
+用加粗标题、引用块、分隔线营造银行 App 的层次感；涨跌色用 emoji（🔴红涨 🟢绿跌）。
+"""
 
 
 def style_report(md: str) -> str:
-    """把纯 markdown 报告转成银行风 HTML 版"""
     out = []
     for line in md.split("\n"):
         s = line.rstrip()
         if not s:
             out.append("")
         elif s.startswith("## "):
-            out.append(f'<font color="{BANK_RED}"><b>▍{s[3:].strip()}</b></font>')
+            out.append(f"**▍{s[3:].strip()}**")
         elif s.startswith("# "):
-            out.append(f'<font color="{BANK_RED}"><b>{s[2:].strip()}</b></font>')
+            out.append(f"**{s[2:].strip()}**")
         elif s.startswith("> "):
-            out.append(f'<font color="{BANK_DARK}">{s[2:].strip()}</font>')
+            out.append(f"> {s[2:].strip()}")
         elif s.startswith("---"):
-            out.append('<hr>')
-        elif s.startswith("- **"):
-            out.append(f'<font color="{BANK_DARK}"><b>{s[2:]}</b></font>')
+            out.append("")
+            out.append("——————————————")
         else:
-            out.append(f'<font color="{BANK_DARK}">{s}</font>')
+            out.append(s)
     return "\n".join(out)
