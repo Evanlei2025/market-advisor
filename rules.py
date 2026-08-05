@@ -267,6 +267,75 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
     return orders, target_alloc, summary_lines
 
 
+def portfolio_simulator(ret_map, weights_after, total):
+    """PortfolioSimulator 前瞻风险预览（下一迭代）：
+    按调仓后金额权重模拟组合风险（现金权重×0收益，不参与归一）。
+    weights_after: {code: 调仓后金额}（含现金键）
+    返回 {"vol","max_dd","var95"} 或 None（数据不足）
+    """
+    if total <= 0:
+        return None
+    import pandas as pd
+    codes = [c for c in weights_after if c in ret_map and weights_after.get(c, 0) > 0]
+    if not codes:
+        return None
+    common = None
+    for c in codes:
+        s = ret_map[c]
+        common = s.index if common is None else common.intersection(s.index)
+    if common is None or len(common) < 30:
+        return None
+    combo = pd.DataFrame({c: ret_map[c].loc[common] for c in codes})
+    w = pd.Series({c: weights_after[c] / total for c in codes})
+    combo_ret = combo.dot(w)
+    annual_vol = float(combo_ret.std() * math.sqrt(250))
+    nav = (1 + combo_ret).cumprod()
+    max_dd = float((nav / nav.cummax() - 1).min())
+    var95 = float(combo_ret.quantile(0.05))
+    return {"vol": annual_vol, "max_dd": max_dd, "var95": var95}
+
+
+def estimate_shares(nav_series, amount, buy_date):
+    """份额估算：amount / 建仓日净值（buy_date 当日或之前最近净值）。
+    用于市值加权组合诊断。无净值数据/无 buy_date 返回 None（回退成本金额权重）。
+    """
+    import pandas as pd
+    if nav_series is None or len(nav_series) == 0 or not buy_date or not amount:
+        return None
+    try:
+        bd = pd.Timestamp(str(buy_date)[:10])
+        df = nav_series.copy()
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+            row = df[df["date"] <= bd]
+            if not row.empty:
+                return amount / float(row["nav"].iloc[-1])
+    except Exception:
+        return None
+    return None
+
+
+def market_value_weights(holdings, nav_series_map, nav_latest_map):
+    """市值权重：份额×最新净值 / 总市值（现金按面值）。
+    返回 ({code: 市值}, total_mv)；份额估算失败回退成本金额。
+    """
+    mvs = {}
+    for h in holdings:
+        key = h.get("fund_code") or h.get("code") or h.get("name", "")
+        amt = float(h.get("amount", 0))
+        if h.get("type") == "cash" or not key:
+            mvs[key] = amt
+            continue
+        shares = estimate_shares(nav_series_map.get(key), amt, h.get("buy_date"))
+        latest = nav_latest_map.get(key)
+        if shares is not None and latest:
+            mvs[key] = shares * latest
+        else:
+            mvs[key] = amt  # 回退成本金额
+    total = sum(mvs.values())
+    return mvs, total
+
+
 def portfolio_diagnostics(cfg, products, ctx):
     """组合诊断：年化波动率 / 250日最大回撤 / VaR95 / 实际权益暴露度
     ctx: {"returns": {code: 日收益Series}} 或 None（数据不足返回 None）

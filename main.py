@@ -769,11 +769,17 @@ def main():
         L(f"- 标准跟随组合（总资产 ¥{total:,.0f}，跟投份数 {cfg.get('portfolio', {}).get('follow_units', 1)}）")
         # 产品 ctx 索引
         pctx_map = {p.get("code", ""): p for p in product_ctxs}
-        # 组合权重（用于诊断）
-        for h in holdings:
-            key = h.get("fund_code") or h.get("code")
-            if key and key in returns_map and total > 0:
-                weights_map[key] = h["amount"] / total
+        # 组合权重：市值加权（份额按建仓日净值估算；无 buy_date 回退成本金额）
+        nav_series_map = {fcode: pc.get("nav_series") for fcode, pc in pctx_map.items()}
+        nav_latest_map = {}
+        for fcode, ns in nav_series_map.items():
+            if ns is not None and not ns.empty:
+                nav_latest_map[fcode] = float(ns["nav"].iloc[-1])
+        mv_map, mv_total = rules.market_value_weights(holdings, nav_series_map, nav_latest_map)
+        for key, mv in mv_map.items():
+            if key in returns_map and mv_total > 0:
+                weights_map[key] = mv / mv_total
+        total_mv = mv_total if mv_total > 0 else total
         # 权益目标仓位（最保守原则 + 股债性价比）
         eq_target, rule_triggers = rules.equity_target(cfg, ctx)
         # 持仓金额映射（按 fund_code）
@@ -890,17 +896,18 @@ def main():
         ctx["ep_status_line"] = ep_line
         ctx["storm_active"] = storm_active
 
-        # ---- 组合诊断 ----
+        # ---- 组合诊断（市值加权 + 调仓后前瞻模拟） ----
         diag = rules.portfolio_diagnostics(
             cfg, products,
             {"returns": returns_map, "weights": weights_map})
         if diag:
             L("")
             L(f"## 组合诊断")
+            L(f"- 组合市值 ¥{total_mv:,.0f}（净值加权）")
             L(f"- 年化波动率 {diag['vol']*100:.1f}%")
             L(f"- 250日最大回撤 {diag['max_dd']*100:.1f}%")
             L(f"- 日度 VaR95 {diag['var95']*100:.2f}%（历史分位法）")
-            # 实际权益暴露度（转债按 50% 折算）
+            # 实际权益暴露度（转债按 50% 折算，市值加权）
             total_exp = 0.0
             for p in products:
                 fcode = p.get("fund_code", "")
@@ -908,9 +915,27 @@ def main():
                     exp = pctx_map[fcode].get("equity_exposure") or 0.0
                     total_exp += weights_map[fcode] * exp
             L(f"- 经转债折算后，组合实际权益暴露度 {total_exp*100:.1f}%")
-            L(f"- （注：当前按持仓成本金额加权估算，盈亏变动后可能失真；净值加权升级已排期）")
+            # PortfolioSimulator：调仓后前瞻预览（仅当日有调仓时）
             if orders:
-                L(f"- （注：当前为调仓前诊断。本次调仓后，权益暴露度将从 {total_exp*100:.1f}% 降至约 {eq_target*100:.0f}%。净值加权升级后将提供精确调仓后诊断。）")
+                after_map = dict(holdings_amt)
+                cash_in_holdings = sum(h.get("amount", 0) for h in holdings if h.get("type") == "cash")
+                after_cash = float(cash_in_holdings)
+                for o in orders:
+                    if o["side"] == "卖出":
+                        after_map[o["code"]] = after_map.get(o["code"], 0) - o["amount"]
+                        after_cash += o["amount"]
+                    elif o["side"] == "买入":
+                        after_map[o["code"]] = after_map.get(o["code"], 0) + o["amount"]
+                        after_cash -= o["amount"]
+                after_map["cash"] = after_cash
+                sim = rules.portfolio_simulator(returns_map, after_map, total)
+                if sim:
+                    L(f"- 调仓后前瞻预览（历史数据模拟）：年化波动率 {sim['vol']*100:.1f}%（vs 当前 {diag['vol']*100:.1f}%），"
+                      f"250日最大回撤 {sim['max_dd']*100:.1f}%（vs 当前 {diag['max_dd']*100:.1f}%），"
+                      f"VaR95 {sim['var95']*100:.2f}%（vs 当前 {diag['var95']*100:.2f}%）")
+            L(f"- （注：市值按建仓日净值（buy_date）推算份额；未录入建仓日的产品按成本金额加权）")
+            if orders:
+                L(f"- （注：当前为调仓前诊断。本次调仓后，权益暴露度将从 {total_exp*100:.1f}% 降至约 {eq_target*100:.0f}%。模拟预览基于历史数据，仅供参考）")
             ctx["diagnostics"] = (f"波动率 {diag['vol']*100:.1f}%，最大回撤 {diag['max_dd']*100:.1f}%，"
                                   f"VaR95 {diag['var95']*100:.2f}%，实际权益暴露 {total_exp*100:.1f}%")
 
@@ -945,7 +970,7 @@ def main():
     if total > 0:
         L("")
         L(f"## 组合检查")
-        L(f"- 总资产: ¥{total:,.0f}")
+        L(f"- 总资产(成本): ¥{total:,.0f}" + (f"，市值(净值加权) ¥{total_mv:,.0f}" if total_mv > 0 else ""))
         for t, label in classes:
             if t in actual:
                 L(f"- {label}: ¥{actual[t]:,.0f}（{actual[t]/total*100:.0f}%）")
