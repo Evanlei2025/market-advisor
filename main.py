@@ -15,6 +15,8 @@ import pandas as pd
 import requests
 
 import llm
+import narrative
+import news_alert
 import rules
 import style
 
@@ -129,18 +131,22 @@ class DataFetcher:
         return df[df["date"] >= cutoff].reset_index(drop=True)
 
     def fund_stock_position(self, fund_code):
-        """股票总仓位（天天基金官方季度资产配置，f_assetAllocation）"""
+        """股票总仓位（天天基金官方季度资产配置，Data_assetAllocation）
+        返回 (仓位比例 float, 季报日期 str)；失败返回 (0.0, "")"""
         try:
             r = self.session.get(f"https://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=20)
-            m = re.search(r"var f_assetAllocation = (\[.*?\]);", r.text)
-            if not m:
-                return 0.0
-            arr = json.loads(m.group(1))
-            if not arr:
-                return 0.0
-            return float(arr[-1][1]) / 100.0
+            if "var Data_assetAllocation = " not in r.text:
+                return 0.0, ""
+            part = r.text.split("var Data_assetAllocation = ", 1)[1]
+            seg = part.split("};", 1)[0] + "}"
+            d = json.loads(seg)
+            cats = d.get("categories", [])
+            for s in d.get("series", []):
+                if s.get("name") == "股票占净比" and s.get("data"):
+                    return float(s["data"][-1]) / 100.0, str(cats[-1])[:10] if cats else ""
+            return 0.0, ""
         except Exception:
-            return 0.0
+            return 0.0, ""
 
     def fund_bond_convertible(self, fund_code):
         """转债仓位占比（季度持仓，债券名称含'转债'）"""
@@ -245,6 +251,16 @@ def fetch_section(fn, name):
             else:
                 log(f"[WARN] {name} 获取失败: {type(e).__name__}: {str(e)[:100]}")
     return None
+
+
+def safe_format(v, fmt="{:+.2f}", suffix="%"):
+    """NaN 全局兜底：数据缺失输出'暂缺'，绝不产生 nan 字符串（架构师 v1.0）"""
+    try:
+        if v is None or v != v:
+            return "暂缺"
+        return fmt.format(v) + suffix
+    except (TypeError, ValueError):
+        return "暂缺"
 
 
 def fetch_once(fn, name):
@@ -362,9 +378,10 @@ def analyze_product(fetcher, p, cfg_ref):
 
     # ---- 穿透风险分类：权益暴露度 = 股票仓位 + 转债仓位×50% ----
     equity_exposure = None
+    position_date = ""
     if ptype in ("bond", "equity", "gold"):
         try:
-            stock_pos = fetch_section(lambda: fetcher.fund_stock_position(fcode), f"股票仓{fcode}")
+            stock_pos, position_date = fetch_section(lambda: fetcher.fund_stock_position(fcode), f"股票仓{fcode}") or (0.0, "")
             conv_pos = fetch_section(lambda: fetcher.fund_bond_convertible(fcode), f"转债仓{fcode}")
             conv_ratio = float(cfg_ref["rules"].get("convertible_exposure_ratio", 0.5))
             if stock_pos is None:
@@ -379,7 +396,7 @@ def analyze_product(fetcher, p, cfg_ref):
 
     stop_line = rules.stop_loss_level(cfg_ref, equity_exposure)
     nav_series = nav.reset_index(drop=True)
-    action, action_reason = rules.product_action(
+    action, action_reason, action_rid = rules.product_action(
         cfg_ref, p,
         {"nav_series": nav_series, "equity_exposure": equity_exposure,
          "nav_latest": float(n.iloc[-1])})
@@ -402,6 +419,10 @@ def analyze_product(fetcher, p, cfg_ref):
 
     signal = action_label
     reason = action_reason
+    if action_rid:
+        reason_disp = f"[{action_rid}] {action_reason}"
+    else:
+        reason_disp = action_reason
 
     line1 = f"\n**{code} {fname}**（{type_label}）"
     line2 = f"- 净值 {nav_str}"
@@ -420,7 +441,17 @@ def analyze_product(fetcher, p, cfg_ref):
                                            f"平台 {p.get('platform','')}" if p.get("platform") else "",
                                            f"备注 {p.get('notes','')}" if p.get("notes") else ""] if x)
     line12 = f"- {exp_str}"
-    line13 = f"- 规则指令：{signal}（{reason}）"
+    line13 = f"- 规则指令：{signal}（{reason_disp}）"
+    # 指令引用行（内容分析师定稿）：用户在产品区即可知是否需要操作
+    if action == "sell_all":
+        line13 += f"\n→ 见下方「今日跟投指令」执行清仓操作"
+    elif action == "sell_half":
+        line13 += f"\n→ 见下方「今日跟投指令」执行减半操作"
+    else:
+        line13 += f"\n→ 今日无操作"
+    # 仓位数据基于最近季报（可能滞后1-3个月），避免误导止损分级
+    if position_date:
+        line13 += f"\n- 仓位数据基于最近季报（{position_date}），可能滞后1-3个月"
 
     ctx.update({
         "unavailable": False, "name": fname,
@@ -429,11 +460,13 @@ def analyze_product(fetcher, p, cfg_ref):
         "max_dd": f"{max_dd*100:.1f}%",
         "ranking": ranking or "无",
         "scale": scale, "inception": inception, "manager": manager,
-        "fees": fees_str or "无", "signal": f"{signal}（{reason}）",
+        "fees": fees_str or "无", "signal": f"{signal}（{reason_disp}）",
         "equity_exposure": equity_exposure,
         "stop_line": stop_line,
         "action": action,
         "action_reason": action_reason,
+        "action_rid": action_rid,
+        "position_date": position_date,
         "nav_series": nav_series,
         "dd_from_high": dd_from_high,
     })
@@ -671,21 +704,11 @@ def main():
         L(f"- 两融余额: 无数据")
     ctx["macro"] = macro_ctx
 
-    # ---------- 4.6 市场要闻（财联社电报） ----------
+    # ---------- 4.6 市场要闻（财联社电报）——仅输入新闻哨兵，日报零暴露 ----------
     news = fetch_section(fetcher.cls_news, "财联社电报")
     news_ctx = []
     if news is not None and not news.empty:
-        L("")
-        L(f"## 市场要闻（财联社）")
-        for _, row in news.head(6).iterrows():
-            title = str(row["标题"]).strip()
-            if not title or pd_isna(title):
-                title = str(row["内容"])[:60]
-            title = title.replace("【", "").replace("】", " ")
-            if len(title) > 30:
-                title = title[:30] + "…"
-            L(f"- {title}")
-        for _, row in news.head(20).iterrows():
+        for _, row in news.head(60).iterrows():
             title = str(row["标题"]).strip()
             content = str(row["内容"]).strip()
             if not title or pd_isna(title):
@@ -711,9 +734,7 @@ def main():
                 returns_map[p["code"]] = nav_s["nav"].pct_change().dropna()
     ctx["products"] = product_ctxs
 
-    # ---------- 5. 组合检查 ----------
-    L("")
-    L(f"## 组合检查")
+    # ---------- 5. 组合检查（计算区：不输出空标题，内容在下方统一渲染） ----------
     holdings = cfg["holdings"]
     target = cfg["target"]
     total = sum(h["amount"] for h in holdings)
@@ -734,6 +755,11 @@ def main():
     bond_codes = {p.get("code", "") for p in products if p.get("type") == "bond"}
 
     # ---- 今日跟投指令（规则引擎，确定性） ----
+    storm_active = False
+    storm_reasons = []
+    ep_lock = False
+    cro = None
+    alerts = None
     L("")
     L(f"## 今日跟投指令")
     if total <= 0:
@@ -765,13 +791,41 @@ def main():
                 ns = pctx_map[fcode].get("nav_series")
                 if ns is not None and not ns.empty:
                     nav_map[fcode] = float(ns["nav"].iloc[-1])
+        # ---- StormLock / EP 分层防御（架构师 v1.0：storm 优先，EP 备注） ----
+        products_status = {fcode: {"action": pc.get("action"),
+                                   "equity_exposure": pc.get("equity_exposure")}
+                           for fcode, pc in pctx_map.items()}
+        storm_active, storm_reasons = rules.storm_lock(eq_target, rule_triggers, products_status)
+        ep_lock = (not storm_active) and (ctx.get("ep_premium_pctile") is not None) and (ctx["ep_premium_pctile"] < 0.10)
         orders, target_alloc, summary_lines = rules.build_order_book(
             cfg, products,
             {"equity_target": eq_target, "holdings_amount": holdings_amt, "nav": nav_map,
              "product_name": name_map,
              "equity_exposure": {fcode: pctx_map[fcode].get("equity_exposure") for fcode in pctx_map},
              "product_ctx": {fcode: pctx_map[fcode] for fcode in pctx_map},
-             "total": total})
+             "total": total},
+            storm_active=storm_active, storm_reasons=storm_reasons, ep_lock=ep_lock)
+        # ---- CRO 统一叙事（ChiefRulesOfficer） ----
+        product_sells = []
+        for o in orders:
+            if o.get("side") == "卖出" and o.get("stop"):
+                pc = pctx_map.get(o["code"], {})
+                product_sells.append({"code": o["code"], "name": o["name"],
+                                      "rule_id": o.get("rule_id"),
+                                      "dd": pc.get("dd_from_high", 0),
+                                      "stop_line": pc.get("stop_line", 0)})
+        cro = narrative.CRO(narrative.CROInput(
+            orders=orders, equity_target=eq_target, storm_active=storm_active,
+            storm_reasons=storm_reasons, ep_lock=ep_lock,
+            ep_pctile=ctx.get("ep_premium_pctile"),
+            triggers=rule_triggers, product_sells=product_sells))
+        # 状态行前置（风暴锁/EP，均在买卖指令之前）
+        storm_line = cro.get_storm_status_line()
+        if storm_line:
+            L(f"> {storm_line}")
+        ep_line = cro.get_ep_status_line()
+        if ep_line:
+            L(f"> {ep_line}")
         if orders:
             # 赎回费纪律：持有天数 > 7 天免惩罚赎回费（buy_date 未录入时给出提醒）
             holdings_buy = {}
@@ -792,17 +846,49 @@ def main():
         L(f"- 调仓后目标仓位：权益 {target_alloc.get('equity', 0)*100:.0f}% / 固收 {target_alloc.get('bond', 0)*100:.0f}% / 现金 {target_alloc.get('cash', 0)*100:.0f}%")
         for s in summary_lines:
             L(f"{s}")
+        # CRO 叙事段（纪律说明引用块）
+        cro_narr = cro.get_narrative()
+        if cro_narr:
+            L("")
+            L(f"> {cro_narr}")
+        # ---- 新闻哨兵：仅在触发警报时渲染预警块（无警报则全静默） ----
+        try:
+            entity_table = news_alert.build_entity_table(fetcher, products, cfg)
+            alerts = news_alert.process_news(news_ctx, entity_table, orders)
+        except Exception as e:
+            log(f"[WARN] 新闻哨兵失败: {str(e)[:100]}")
+            alerts = None
+        if alerts:
+            L("")
+            L(f"## ⚠ 异常事件预警")
+            for a in alerts:
+                lvl = "一级警报" if a["level"] == 1 else f"二级警报（{a.get('note', '与今日纪律同向，印证决策方向')}）"
+                L(f"**{lvl}**")
+                L(f"- {a['content']}")
+                L(f"  - 原始新闻（用于审计核实）：")
+                orig = a.get("original", "")
+                for i in range(0, len(orig), 80):
+                    L(f"    {orig[i:i+80]}")
+            L(f"*此为异常预警，不改变既定纪律指令。*")
+        L("")
         L(f"- 执行窗口：今日 15:00 前；份额为估值（基于 T-1 净值），实际以基金公司确认份额为准")
         ob = []
         for o in orders:
             ob.append(f"{o['side']} {o['code']} {o['name']} {o['amount']:,.0f}元（{o['reason']}）")
         ctx["order_book"] = "\n".join(ob) if ob else "无操作，维持当前持仓"
         ctx["target_alloc"] = f"权益 {target_alloc.get('equity',0)*100:.0f}% / 固收 {target_alloc.get('bond',0)*100:.0f}% / 现金 {target_alloc.get('cash',0)*100:.0f}%"
-        bond_state = "今日按纪律买入债券（风险预算驱动，非看多债市）" if any(
+        bond_state = "今日按纪律买入债券（组合风险管理驱动，非看多债市）" if any(
             o.get("side") == "买入" and o.get("code") in bond_codes for o in orders) else (
             "今日卖出债券（减配固收）" if any(
                 o.get("side") == "卖出" and o.get("code") in bond_codes for o in orders) else "今日无债券买卖指令")
         ctx["bond_order_state"] = bond_state
+        ctx["rule_ids"] = sorted(set([t.get("id") for t in rule_triggers if t.get("id")] +
+                                     [o.get("rule_id") for o in orders if o.get("rule_id")]))
+        ctx["cro_headline"] = cro.get_headline()
+        ctx["cro_narrative"] = cro_narr or ""
+        ctx["storm_status_line"] = storm_line
+        ctx["ep_status_line"] = ep_line
+        ctx["storm_active"] = storm_active
 
         # ---- 组合诊断 ----
         diag = rules.portfolio_diagnostics(
@@ -822,10 +908,13 @@ def main():
                     exp = pctx_map[fcode].get("equity_exposure") or 0.0
                     total_exp += weights_map[fcode] * exp
             L(f"- 经转债折算后，组合实际权益暴露度 {total_exp*100:.1f}%")
+            L(f"- （注：当前按持仓成本金额加权估算，盈亏变动后可能失真；净值加权升级已排期）")
+            if orders:
+                L(f"- （注：当前为调仓前诊断。本次调仓后，权益暴露度将从 {total_exp*100:.1f}% 降至约 {eq_target*100:.0f}%。净值加权升级后将提供精确调仓后诊断。）")
             ctx["diagnostics"] = (f"波动率 {diag['vol']*100:.1f}%，最大回撤 {diag['max_dd']*100:.1f}%，"
                                   f"VaR95 {diag['var95']*100:.2f}%，实际权益暴露 {total_exp*100:.1f}%")
 
-        # ---- 决策依据（规则触发明细） ----
+        # ---- 决策依据（规则触发明细，每条带规则 ID，可追溯） ----
         L("")
         L(f"## 决策依据（今日触发的规则）")
         ep = ctx.get("ep", {})
@@ -833,11 +922,24 @@ def main():
             L(f"- 股债性价比：{ep.get('label', '')}")
         if rule_triggers:
             for tr in rule_triggers:
-                L(f"- {tr}")
+                L(f"- [{tr.get('id')}] {tr.get('text')}")
         else:
             L(f"- 无阶梯规则触发，权益维持目标 {target.get('equity', 0.4)*100:.0f}%")
+        if storm_active:
+            src_ids = [t["id"] for t in rule_triggers
+                       if t.get("id") in {"LAD-CSI300-95", "LAD-CSI500-75", "MIN-MERGE"}]
+            src_txt = " + ".join(f"[{i}]" for i in src_ids) if src_ids else "权益规则信号"
+            L(f"- [{'/'.join(storm_reasons)}] 触发源：{src_txt} → 风暴安全锁激活")
         L(f"- 止损/止盈状态见理财产品跟踪的规则指令行")
-        ctx["decision_basis"] = "\n".join((["股债性价比：" + ep.get("label", "")] if ep else []) + rule_triggers)
+        db = []
+        if ep:
+            db.append("股债性价比：" + ep.get("label", ""))
+        db += [f"[{t.get('id')}] {t.get('text')}" for t in rule_triggers]
+        ctx["decision_basis"] = "\n".join(db)
+
+        # ---- CRO 分隔声明（固定文案，无论有无 AI 解读必须出现） ----
+        L("")
+        L(f"> {cro.get_separator()}")
 
     # 组合检查明细（原再平衡逻辑保留为仓位展示）
     if total > 0:
@@ -848,9 +950,9 @@ def main():
             if t in actual:
                 L(f"- {label}: ¥{actual[t]:,.0f}（{actual[t]/total*100:.0f}%）")
 
-    # ---------- 6. 操作建议（AI 解读指令区，规则已在上方输出） ----------
+    # ---------- 6. 指令解读区（AI 沙箱板块；静态行仅为数据诊断，不产生建议） ----------
     L("")
-    L(f"## 今日操作建议（解读）")
+    L(f"## 今日指令解读")
     eq = None
     if equity_stances:
         avg = sum(equity_stances) / len(equity_stances)
@@ -862,15 +964,15 @@ def main():
         bond_buy_orders = [o for o in orders if o.get("side") == "买入" and o.get("code") in bond_codes]
         if bond_buy_orders:
             ob = bond_buy_orders[0]
-            L(f"- 债券：战术欠佳，战略按指令配置（今日按纪律再平衡买入 {ob['code']} {ob['amount']:,.0f} 元，属风险预算驱动，非看多债市；若未来利率回升，固收目标仓位可能下调）")
+            L(f"- 债券：按纪律增配（今日按规则再平衡买入 {ob['code']} {ob['amount']:,.0f} 元。此决策由组合风险管理驱动，而非对利率的短期判断）")
         elif bond_sig > 0:
-            L(f"- 债券：战术占优，战略按指令配置")
+            L(f"- 债券：战术占优，按指令配置")
         else:
-            L(f"- 债券：战术欠佳，战略维持当前配置")
+            L(f"- 债券：战术欠佳，战略按指令配置")
         if bond is not None and not bond.empty:
             L(f"  - 10年国债收益率 {y10:.2f}%，十年分位 {r*100:.0f}%"
               + ("（收益率极低，债价偏贵）" if r < 0.3 else ("（收益率较高，债价便宜）" if r > 0.7 else "（收益率中性）")))
-            L(f"  - 期限利差 {spread:+.2f}%" + ("（倒挂，警惕）" if spread < 0 else ""))
+            L(f"  - 期限利差 {safe_format(spread, '{:+.2f}', '%')}" + ("（倒挂，警惕）" if spread == spread and spread < 0 else ""))
     if gold_sig is not None:
         L(f"- 黄金：{stance_label(gold_sig)}（卫星仓，维持 {cfg['target'].get('gold', 0.1)*100:.0f}% 以内）")
         if gold is not None and not gold.empty:
@@ -881,6 +983,9 @@ def main():
     ctx["signal_equity"] = eq or "无数据"
     ctx["rebalance"] = "\n".join(rebal_lines) if rebal_lines else "无"
     ctx["holdings_perf"] = "\n".join(mv_lines) if mv_lines else "无"
+    # 风险观察风暴条（内容分析师定稿：风暴锁激活时追加纪律成本说明）
+    if storm_active:
+        ctx["storm_risk_line"] = "风暴安全锁已激活，现金冻结期间可能错过短期反弹机会。这是纪律成本，历史数据表明遵守风暴锁能显著降低组合毁灭性风险。"
 
     L("")
     L(f"---")
@@ -894,15 +999,23 @@ def main():
     insights, usage_info = llm.generate_insights(ctx)
     if insights:
         pnames = {p.get("code", ""): p.get("name", "") for p in products}
-        report = llm.insert_insights(report, insights, pnames)
+        report = llm.insert_insights(report, insights, pnames, ctx)
         log(f"AI 解读已生成（{usage_info}）")
     else:
         log(f"AI 解读跳过: {usage_info}")
+        # 降级回退：指令解读板块静态化（内容分析师 8.5 定稿）
+        if total > 0:
+            if orders:
+                fallback = cro.get_narrative() or "以上指令由规则引擎生成，请按「今日跟投指令」执行。"
+            else:
+                fallback = "今日无规则触发，维持当前持仓。各项监控指标均在纪律允许范围内。"
+            report += f"\n## 今日指令解读\n> {fallback}"
 
-    # 规则生成的"今日一句话"置顶（组合未填写时不出头，避免误导；必须在 AI 重组之后插入）
-    if total > 0:
-        headline = rules.build_headline(orders)
-        report = f"## 今日一句话\n> {headline}\n\n" + report
+    # ---- 规则生成的"今日一句话" + "今日指令摘要"置顶（必须在 AI 重组之后插入） ----
+    if total > 0 and cro is not None:
+        top = [f"## 今日一句话", f"> {cro.get_headline()}", ""]
+        top.append(cro.get_summary())
+        report = "\n".join(top) + "\n\n" + report
 
     # ---------- 7. 输出 ----------
     os.makedirs(REPORT_DIR, exist_ok=True)

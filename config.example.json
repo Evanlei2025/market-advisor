@@ -26,7 +26,13 @@
     "ep_premium_years": 5,
     "ep_premium_cap": { "pctile": 0.1, "equity_cap": 0.1 },
     "convertible_exposure_ratio": 0.5,
-    "min_order_amount": 100
+    "min_order_amount": 100,
+    "unlock_first_day_ratio": 1.0,
+    "unlock_volatility_cap": null
+  },
+  "news_watch": {
+    "industries": ["半导体", "医药", "消费", "地产", "银行", "军工", "新能源", "汽车", "AI", "人工智能", "机器人"],
+    "macro_kw": ["加息", "降息", "制裁", "战争", "冲突", "违约", "挤兑", "流动性", "紧急", "熔断", "暂停交易", "退市", "立案调查", "监管", "处罚"]
   },
   "portfolio": {
     "name": "标准跟随组合",
