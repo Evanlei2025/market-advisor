@@ -13,6 +13,8 @@ from datetime import date, datetime
 import pandas as pd
 import requests
 
+import llm
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 REPORT_DIR = os.path.join(BASE_DIR, "reports")
@@ -198,6 +200,7 @@ def main():
     today = date.today().isoformat()
     lines = []
     L = lines.append
+    ctx = {"news": []}
 
     # ---------- 1. 指数速览 ----------
     indexes = [
@@ -206,6 +209,7 @@ def main():
     ]
     pe_indexes = ["沪深300", "中证500", "上证红利"]
     equity_stances = []
+    idx_ctx = {}
     L(f"## 市场速览")
     for name, tx in indexes:
         df = fetch_section(lambda t=tx: fetcher.index_daily(t), name)
@@ -217,6 +221,7 @@ def main():
         pct = last["pct"] if last["pct"] == last["pct"] else 0.0
         emoji = "🔴" if pct >= 0 else "🟢"
         L(f"- {name}: {close:.2f} {emoji}{pct:+.2f}%")
+        idx_ctx[name] = f"{close:.2f}（{pct:+.2f}%）"
         ma120 = sma(df["close"], 120).iloc[-1]
         # 估值分位 + 趋势（仅对乐咕支持的指数）
         if name not in pe_indexes:
@@ -243,6 +248,8 @@ def main():
     if us is not None and len(us) >= 2:
         us_pct = us.iloc[-1]["pct"]
         L(f"- 隔夜标普500: {us.iloc[-1]['close']:.1f} {'🔴' if us_pct >= 0 else '🟢'}{us_pct:+.2f}%")
+        idx_ctx["隔夜标普500"] = f"{us.iloc[-1]['close']:.1f}（{us_pct:+.2f}%）"
+    ctx["indexes"] = idx_ctx
 
     # ---------- 2. 估值温度 ----------
     L(f"\n## 估值温度 (近{PE_HIST_YEARS}年分位)")
@@ -265,8 +272,11 @@ def main():
         last_row = mpe.iloc[-1]
         val_lines.append(f"- 全市场(上证): PE {last_row['平均市盈率']:.2f}")
     L("\n".join(val_lines))
+    ctx["valuation"] = dict((l.split(":")[0].strip(), l.split(":", 1)[1].strip())
+                            for l in val_lines if ":" in l)
 
-    # ---------- 3. 债券 ----------
+    # 债券
+    bond_ctx = {}
     L(f"\n## 债市与利率")
     bond = fetch_section(fetcher.bond_rates, "国债收益率")
     bond_sig = None
@@ -276,7 +286,9 @@ def main():
         r = pct_rank(bond["y10"], y10)
         spread = y10 - y2
         L(f"- 中国10年期国债: {y10:.2f}%，分位 {r*100:.0f}%")
+        bond_ctx["10年期国债"] = f"{y10:.2f}%，分位 {r*100:.0f}%"
         L(f"- 期限利差(10Y-2Y): {spread:+.2f}%{'（倒挂，警惕）' if spread < 0 else ''}")
+        bond_ctx["期限利差(10Y-2Y)"] = f"{spread:+.2f}%{'（倒挂）' if spread < 0 else ''}"
         if r < 0.3:
             bond_sig = -1.0
             L(f"- 债券研判: 利率处于低位，债价偏贵 → 债券略减")
@@ -293,8 +305,12 @@ def main():
     lpr_row = fetch_section(fetcher.lpr, "LPR")
     if lpr_row is not None:
         L(f"- LPR: 1年期 {lpr_row['LPR1Y']:.2f}%，5年期 {lpr_row['LPR5Y']:.2f}%（{str(lpr_row['TRADE_DATE'])[:10]}）")
+        bond_ctx["LPR"] = f"1Y {lpr_row['LPR1Y']:.2f}%，5Y {lpr_row['LPR5Y']:.2f}%"
+    ctx["bond"] = bond_ctx
+    ctx["signal_bond"] = stance_label(bond_sig) if bond_sig is not None else "无数据"
 
     # ---------- 4. 黄金 ----------
+    gold_ctx = {}
     L(f"\n## 黄金")
     gold = fetch_section(fetcher.gold_daily, "上海金")
     gold_sig = None
@@ -304,16 +320,21 @@ def main():
         m20 = last / gold["close"].iloc[-21] - 1 if len(gold) > 21 else 0.0
         trend = "多头" if last > ma120 else "空头"
         L(f"- Au99.99: ¥{last:.2f}，20日动量 {m20:+.1%}，趋势{trend}")
+        gold_ctx["Au99.99"] = f"¥{last:.2f}，20日动量 {m20:+.1%}，趋势{trend}"
         gold_sig = 0.5 if last > ma120 else -0.5
         L(f"- 黄金研判: {'趋势向上，可持有' if trend == '多头' else '趋势向下，暂不加仓'}")
     else:
         L(f"- 无数据")
+    ctx["gold"] = gold_ctx
+    ctx["signal_gold"] = stance_label(gold_sig) if gold_sig is not None else "无数据"
 
     # ---------- 4.5 宏观与资金面 ----------
+    macro_ctx = {}
     L(f"\n## 宏观与资金面")
     fx = fetch_section(fetcher.usd_cny, "汇率")
     if fx is not None:
         L(f"- 美元/人民币: {fx:.4f}")
+        macro_ctx["美元/人民币"] = f"{fx:.4f}"
     else:
         L(f"- 汇率: 无数据")
     margin = fetch_section(fetcher.margin_sse, "融资融券")
@@ -324,11 +345,16 @@ def main():
             prev = float(margin.iloc[1]["融资融券余额"])
             chg = (cur - prev) / 1e8
             L(f"  （{chg:+.0f}亿 vs 上一交易日，杠杆情绪{'升温' if chg > 0 else '降温'}）")
+            macro_ctx["两融余额(沪市)"] = f"{cur/1e8:,.0f}亿（{chg:+.0f}亿 vs 上日，{'升温' if chg > 0 else '降温'}）"
+        else:
+            macro_ctx["两融余额(沪市)"] = f"{cur/1e8:,.0f}亿"
     else:
         L(f"- 两融余额: 无数据")
+    ctx["macro"] = macro_ctx
 
     # ---------- 4.6 市场要闻（财联社电报） ----------
     news = fetch_section(fetcher.cls_news, "财联社电报")
+    news_ctx = []
     if news is not None and not news.empty:
         L(f"\n## 市场要闻（财联社）")
         for _, row in news.head(6).iterrows():
@@ -339,6 +365,13 @@ def main():
             if len(title) > 62:
                 title = title[:62] + "…"
             L(f"- {title}")
+        for _, row in news.head(20).iterrows():
+            title = str(row["标题"]).strip()
+            content = str(row["内容"]).strip()
+            if not title or pd_isna(title):
+                title = content[:60]
+            news_ctx.append({"title": title, "content": content})
+    ctx["news"] = news_ctx
 
     # ---------- 5. 组合检查 ----------
     L(f"\n## 组合检查")
@@ -416,6 +449,7 @@ def main():
 
     # ---------- 6. 总体建议 ----------
     L(f"\n## 今日操作建议")
+    eq = None
     if equity_stances:
         avg = sum(equity_stances) / len(equity_stances)
         eq = stance_label(avg)
@@ -431,12 +465,25 @@ def main():
     if not actions and (not equity_stances or abs(sum(equity_stances)/len(equity_stances)) < 0.3):
         L(f"- 组合在目标区间内，市场信号中性 → 今天不需要任何操作")
 
+    ctx["signal_equity"] = eq or "无数据"
+    ctx["rebalance"] = "\n".join(rebal_lines) if rebal_lines else "无"
+    ctx["holdings_perf"] = "\n".join(mv_lines) if mv_lines else "无"
+
     L(f"\n---")
     L(f"*本报告由本地程序按固定规则自动生成，仅供参考，不构成投资建议。*")
     L(f"*买卖请手动执行；每次交易后请更新 config.json 中对应持仓金额。*")
 
     report = "\n".join(lines)
     title = f"每日投顾报告 {today}"
+
+    # ---------- 6.5 AI 解读层（LLM 不可用时自动降级为纯静态报告） ----------
+    insights, usage_info = llm.generate_insights(ctx)
+    if insights:
+        ai_block = llm.render_insights(insights)
+        report += "\n\n" + ai_block
+        log(f"AI 解读已生成（{usage_info}）")
+    else:
+        log(f"AI 解读跳过: {usage_info}")
 
     # ---------- 7. 输出 ----------
     os.makedirs(REPORT_DIR, exist_ok=True)

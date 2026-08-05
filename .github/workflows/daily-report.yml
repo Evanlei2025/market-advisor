@@ -31,6 +31,7 @@ jobs:
       - name: Run daily report
         env:
           ADVISOR_CONFIG_JSON: ${{ secrets.ADVISOR_CONFIG }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TQDM_DISABLE: '1'
         run: python main.py
 
