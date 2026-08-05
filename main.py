@@ -319,7 +319,7 @@ def analyze_product(fetcher, p, cfg_ref):
     trend_up = float(n.iloc[-1]) > ma60
     latest = nav.iloc[-1]
     growth = float(latest["growth"]) if pd_isna(latest["growth"]) == False else 0.0
-    nav_str = f"{float(latest['nav']):.4f}（{growth:+.2f}%）"
+    nav_str = f"{float(latest['nav']):.4f}（{growth:+.2f}%，净值日期 {str(latest['date'])[:10]}）"
 
     fees = fetch_section(lambda: fetcher.fund_fees(fcode), f"费率{fcode}") or []
 
@@ -604,10 +604,10 @@ def main():
         bond_ctx["期限利差(10Y-2Y)"] = f"{spread:+.2f}%{'（倒挂）' if spread < 0 else ''}"
         if r < 0.3:
             bond_sig = -1.0
-            L(f"- 债券研判: 利率处于低位，债价偏贵 → 债券略减")
+            L(f"- 债券研判: 战术上利率处于低位、债价偏贵（分位 {r*100:.0f}%）；战略方向以「今日跟投指令」的再平衡纪律为准")
         elif r > 0.7:
             bond_sig = 1.0
-            L(f"- 债券研判: 利率处于高位，债价便宜 → 债券可增")
+            L(f"- 债券研判: 战术上利率处于高位、债价便宜（分位 {r*100:.0f}%）；战略方向以「今日跟投指令」的再平衡纪律为准")
         else:
             bond_sig = 0.0
             L(f"- 债券研判: 中性")
@@ -637,7 +637,10 @@ def main():
         L(f"- Au99.99: ¥{last:.2f}，当日 {d1:+.2%}，20日动量 {m20:+.1%}，趋势{trend}")
         gold_ctx["Au99.99"] = f"¥{last:.2f}，当日 {d1:+.2%}，20日动量 {m20:+.1%}，趋势{trend}"
         gold_sig = 0.5 if last > ma120 else -0.5
-        L(f"- 黄金研判: {'趋势向上，可持有' if trend == '多头' else '趋势向下，暂不加仓'}")
+        if trend == "多头":
+            L(f"- 黄金研判: 趋势向上，可持有；单日回调不改20日动量偏多格局")
+        else:
+            L(f"- 黄金研判: 趋势向下，暂不加仓；单日反弹不改20日动量偏空格局，不满足右侧入场条件")
     else:
         L(f"- 无数据")
     ctx["gold"] = gold_ctx
@@ -728,6 +731,7 @@ def main():
     summary_lines = []
     target_alloc = {}
     rule_triggers = []
+    bond_codes = {p.get("code", "") for p in products if p.get("type") == "bond"}
 
     # ---- 今日跟投指令（规则引擎，确定性） ----
     L("")
@@ -769,9 +773,18 @@ def main():
              "product_ctx": {fcode: pctx_map[fcode] for fcode in pctx_map},
              "total": total})
         if orders:
+            # 赎回费纪律：持有天数 > 7 天免惩罚赎回费（buy_date 未录入时给出提醒）
+            holdings_buy = {}
+            for h in holdings:
+                k = h.get("fund_code") or h.get("code")
+                if k:
+                    holdings_buy[k] = h.get("buy_date", "")
             for o in orders:
                 sh = f"，赎回 {o['shares']:,.2f} 份（估）" if o["side"] == "卖出" and o.get("shares") else ""
-                L(f"- {o['side']}：{o['code']} {o['name']}，{o['amount']:,.0f} 元{sh}")
+                fee_note = ""
+                if o["side"] == "卖出":
+                    fee_note = redemption_note(o["code"], holdings_buy.get(o["code"], ""), pctx_map.get(o["code"], {}).get("fees", ""))
+                L(f"- {o['side']}：{o['code']} {o['name']}，{o['amount']:,.0f} 元{sh}{fee_note}")
                 L(f"  原因：{o['reason']}")
         else:
             L(f"- 无操作，维持当前持仓（今日无任何规则触发）")
@@ -785,6 +798,11 @@ def main():
             ob.append(f"{o['side']} {o['code']} {o['name']} {o['amount']:,.0f}元（{o['reason']}）")
         ctx["order_book"] = "\n".join(ob) if ob else "无操作，维持当前持仓"
         ctx["target_alloc"] = f"权益 {target_alloc.get('equity',0)*100:.0f}% / 固收 {target_alloc.get('bond',0)*100:.0f}% / 现金 {target_alloc.get('cash',0)*100:.0f}%"
+        bond_state = "今日按纪律买入债券（风险预算驱动，非看多债市）" if any(
+            o.get("side") == "买入" and o.get("code") in bond_codes for o in orders) else (
+            "今日卖出债券（减配固收）" if any(
+                o.get("side") == "卖出" and o.get("code") in bond_codes for o in orders) else "今日无债券买卖指令")
+        ctx["bond_order_state"] = bond_state
 
         # ---- 组合诊断 ----
         diag = rules.portfolio_diagnostics(
@@ -841,8 +859,14 @@ def main():
         for d in equity_detail:
             L(f"  - {d}")
     if bond_sig is not None:
-        bs = stance_label(bond_sig)
-        L(f"- 债券：{bs}")
+        bond_buy_orders = [o for o in orders if o.get("side") == "买入" and o.get("code") in bond_codes]
+        if bond_buy_orders:
+            ob = bond_buy_orders[0]
+            L(f"- 债券：战术欠佳，战略按指令配置（今日按纪律再平衡买入 {ob['code']} {ob['amount']:,.0f} 元，属风险预算驱动，非看多债市；若未来利率回升，固收目标仓位可能下调）")
+        elif bond_sig > 0:
+            L(f"- 债券：战术占优，战略按指令配置")
+        else:
+            L(f"- 债券：战术欠佳，战略维持当前配置")
         if bond is not None and not bond.empty:
             L(f"  - 10年国债收益率 {y10:.2f}%，十年分位 {r*100:.0f}%"
               + ("（收益率极低，债价偏贵）" if r < 0.3 else ("（收益率较高，债价便宜）" if r > 0.7 else "（收益率中性）")))
@@ -875,6 +899,11 @@ def main():
     else:
         log(f"AI 解读跳过: {usage_info}")
 
+    # 规则生成的"今日一句话"置顶（组合未填写时不出头，避免误导；必须在 AI 重组之后插入）
+    if total > 0:
+        headline = rules.build_headline(orders)
+        report = f"## 今日一句话\n> {headline}\n\n" + report
+
     # ---------- 7. 输出 ----------
     os.makedirs(REPORT_DIR, exist_ok=True)
     path = os.path.join(REPORT_DIR, f"report_{today}.md")
@@ -890,6 +919,24 @@ def main():
             push_serverchan(cfg["push"]["serverchan_key"], title, report)
         else:
             log("push.channel = none，未推送（本地报告已保存）")
+
+
+def redemption_note(code, buy_date, fees_str):
+    """赎回费纪律：持有天数 > 7 天免惩罚赎回费，显式标注交易成本"""
+    fee = ""
+    m = re.search(r"短期赎回([\d.]+)%", fees_str)
+    if m:
+        fee = f"{float(m.group(1)):g}%"
+    if buy_date:
+        try:
+            days = (date.today() - datetime.strptime(str(buy_date)[:10], "%Y-%m-%d").date()).days
+        except Exception:
+            days = None
+        if days is not None:
+            if days > 7:
+                return f"（持有约 {days} 天＞7 天，无惩罚赎回费）"
+            return f"（持有约 {days} 天≤7 天，将收短期赎回费 {fee or '?'}，请确认后执行）"
+    return f"（持有天数未录入；若持有≤7天将收短期赎回费 {fee or '?'}，请以 App 确认）"
 
 
 def pd_isna(v):

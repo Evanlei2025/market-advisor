@@ -41,9 +41,12 @@ def equity_target(cfg, ctx):
         triggers.append(f"最保守原则：最终权益目标 = min(各规则值) = {target*100:.0f}%")
 
     ep = ctx.get("ep_premium_pctile")
-    if ep is not None and ep < 0.10:
-        target = min(target, 0.10)
-        triggers.append(f"股债性价比锁定：EP溢价分位 {ep*100:.0f}% < 10% → 权益目标强制 ≤ 10%")
+    if ep is not None:
+        if ep < 0.10:
+            target = min(target, 0.10)
+            triggers.append(f"股债性价比极端约束：分位 {ep*100:.0f}% < 10% → 已激活，权益目标强制 ≤ 10%")
+        else:
+            triggers.append(f"股债性价比极端约束：分位 {ep*100:.0f}% > 10% → 不触发权益仓位上限锁定（安全阀未激活）")
     return target, triggers
 
 
@@ -189,6 +192,25 @@ def build_order_book(cfg, products, ctx):
 
     target_alloc = {"equity": target_equity, "bond": target_bond, "cash": target_cash}
     return orders, target_alloc, summary_lines
+
+
+def build_headline(orders):
+    """规则生成"今日一句话"：让用户不点开日报就知道今天发生了什么。
+    orders: build_order_book 返回的指令列表
+    返回 str（无订单返回"今日无规则触发，维持当前持仓"）
+    """
+    if not orders:
+        return "今日无规则触发，维持当前持仓。"
+    parts = []
+    if any(o.get("stop") and o.get("side") == "卖出" for o in orders):
+        parts.append("止损信号触发：清仓权益，转入固收")
+    elif any(o.get("side") == "卖出" for o in orders):
+        parts.append("止盈/减配信号触发：部分锁定收益")
+    if any(o.get("side") == "买入" for o in orders):
+        parts.append("再平衡：增配固收")
+    if not parts:
+        parts.append("今日有再平衡指令")
+    return "；".join(parts) + "。"
 
 
 def portfolio_diagnostics(cfg, products, ctx):

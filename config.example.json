@@ -5,21 +5,44 @@
     "serverchan_key": ""
   },
   "target": {
-    "equity": 0.45,
-    "bond": 0.45,
-    "gold": 0.1
+    "equity": 0.4,
+    "bond": 0.5,
+    "cash": 0.1
   },
-  "rebalance_band": 0.05,
+  "rules": {
+    "stop_loss": {
+      "equity": 0.18,
+      "convertible": 0.1,
+      "pure_bond": 0.03,
+      "fallback": 0.25
+    },
+    "take_profit_1y": 0.25,
+    "equity_ladder": [
+      { "pe_pctile": 0.8, "mom_neg": true, "target": 0.3 },
+      { "pe_pctile": 0.9, "target": 0.2 },
+      { "pe_pctile": 0.95, "target": 0.05 }
+    ],
+    "csi500": { "pe_pctile": 0.75, "mom_20d": -0.05, "target": 0.05 },
+    "ep_premium_years": 5,
+    "ep_premium_cap": { "pctile": 0.1, "equity_cap": 0.1 },
+    "convertible_exposure_ratio": 0.5,
+    "min_order_amount": 100
+  },
+  "portfolio": {
+    "name": "标准跟随组合",
+    "scale": 50000,
+    "follow_units": 1
+  },
   "products": [
     { "code": "P001", "name": "", "type": "bond", "fund_code": "003358", "platform": "", "notes": "" },
     { "code": "P002", "name": "", "type": "money", "fund_code": "000198", "platform": "", "notes": "" },
     { "code": "P003", "name": "", "type": "gold", "fund_code": "000217", "platform": "", "notes": "" }
   ],
   "holdings": [
-    { "name": "沪深300ETF(510300)", "code": "510300", "type": "equity", "amount": 50000 },
-    { "name": "中证红利ETF(515080)", "code": "515080", "type": "equity", "amount": 30000 },
-    { "name": "场外债券基金", "code": "", "fund_code": "", "type": "bond", "amount": 80000, "yield_pct": 3.0 },
-    { "name": "黄金ETF(518880)", "code": "518880", "type": "gold", "amount": 20000 },
+    { "name": "沪深300ETF(510300)", "code": "510300", "type": "equity", "amount": 50000, "buy_date": "2026-01-05" },
+    { "name": "中证红利ETF(515080)", "code": "515080", "type": "equity", "amount": 30000, "buy_date": "2026-01-05" },
+    { "name": "场外债券基金", "code": "", "fund_code": "", "type": "bond", "amount": 80000, "yield_pct": 3.0, "buy_date": "2026-01-05" },
+    { "name": "黄金ETF(518880)", "code": "518880", "type": "gold", "amount": 20000, "buy_date": "2026-01-05" },
     { "name": "货币基金/现金", "code": "", "type": "cash", "amount": 10000, "yield_pct": 1.6 }
   ]
 }
