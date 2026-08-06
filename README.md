@@ -1,97 +1,87 @@
-# 每日投顾报告程序
+# 每日投顾报告（market_advisor）
 
-本地定时运行的规则化投顾报告：每天收盘后抓取市场数据，按固定规则给出操作建议，推送到微信。**只出建议，不自动交易；出入金均由你手动执行。**
+规则化投顾日报：每天收盘后采集市场数据，**规则引擎输出确定性信号，AI 只做受约束解读**，推送到微信。**只出建议不自动交易；出入金均由你手动执行。**
 
-## 两种运行方式
+## 架构
 
-- **方式 A：GitHub Actions 云托管（推荐，不依赖你的电脑）**：见下方"云部署"
-- **方式 B：本地计划任务**：适合想保留本地存档的情况，见"本地部署"
+```
+config.json (持仓/关注池/规则/结算参数)
+  → DataFetcher (49项数据源: 腾讯/乐咕/上金所/天天基金/雪球/财联社/央行/上交所等)
+  → analyze_product (每产品: 净值/收益/回撤/排名/费率/权益暴露/HHI)
+  → rules.py (权益目标阶梯 + 市场预警 + 动态止盈V2.2 + 订单簿 + 组合诊断)
+  → narrative.CRO (大白话因果链，不调用LLM)
+  → news_alert (财联社电报实体匹配，一级/二级警报)
+  → llm.generate_insights → AdvisorGatekeeper 三层硬过滤 → 插入各板块
+  → 报告组装 (MD + HTML含Chart.js图表 + 精简版)
+  → Server酱 → 微信
+```
 
-## 云部署（GitHub Actions）
+## 模块
 
-1. 把本仓库 fork 或 push 到你的 GitHub 账号（公开/私有均可）
-2. 进入仓库 → Settings → **Secrets and variables → Actions** → New repository secret：
-   - Name：`ADVISOR_CONFIG`
-   - Value：你的完整 `config.json` 内容（参考 `config.example.json` 结构，填入真实持仓金额和 webhook）
-3. 确认 Workflow 已启用（Actions 页面可见 `daily-report`），或手动触发一次验证：Actions → daily-report → **Run workflow**
-4. 之后每个交易日 **北京时间 15:35** 自动生成报告并推送到你的微信（UTC 07:35，周一到周五）
-5. 报告存档在每次运行的 Artifacts 中（保留 90 天），微信推送内为完整建议
+| 文件 | 职责 |
+|---|---|
+| `main.py` | 主编排：数据采集→规则决策→报告组装→推送（含降级兜底/状态板块/图表数据） |
+| `rules.py` | 确定性策略引擎：权益目标/市场预警/动态止盈V2.2/订单簿/组合诊断/评分排序 |
+| `llm.py` | DeepSeek 解读 + AdvisorGatekeeper（黑名单正则+数字审计+规则ID白名单，>30%回退CRO） |
+| `narrative.py` | CRO 叙事：规则信号→人话因果链 + 规则原理锚点 + 术语速查 |
+| `news_alert.py` | 财联社电报实体匹配警报（按持仓占比设门槛） |
+| `state_store.py` | 状态与记忆：在途资金/冷却期/止盈留痕/推荐日志/状态快照/知识库 |
+| `html_render.py` | Markdown→HTML（表格+Chart.js三图表，无第三方依赖） |
+| `style.py` | Markdown 美化（中英数字间加空格） |
+| `diagnose_position.py` | 基金仓位穿透诊断工具（手工运行） |
 
-> 注意：公开仓库下，持仓金额与 webhook 务必只放在 Secret 里，不要提交到 `config.json`（该文件已被 .gitignore 排除）。
+## 云部署（GitHub Actions，推荐）
+
+1. push 到 GitHub（公开仓库，敏感数据只放 Secret）
+2. Settings → Secrets and variables → Actions 添加：
+   - `ADVISOR_CONFIG`：完整 `config.json` 内容（参考 `config.example.json`）
+   - `DEEPSEEK_API_KEY`：DeepSeek key
+   - `SERVERCHAN_KEY`：Server酱 SendKey（可选，仅失败通知用）
+3. 每个交易日北京时间 15:35 自动运行；报告存档 artifacts 90 天；`knowledge_base/` 自动 commit 回写（跨日持久）；Pages 部署完整版网页（`https://Evanlei2025.github.io/market-advisor/latest.html`）
 
 ## 本地部署
 
-## 文件说明
-
-| 文件 | 说明 |
-|---|---|
-| `main.py` | 主程序：采集 → 决策 → 报告 → 推送 |
-| `config.json` | 你的配置：目标仓位、持仓、推送渠道 |
-| `register_task.ps1` | 注册 Windows 计划任务（工作日 15:35 运行） |
-| `reports/` | 每日报告存档（Markdown） |
-| `logs/run.log` | 运行日志 |
-
-## 首次配置
-
-1. 安装依赖：`pip install -r requirements.txt`
-2. 编辑 `config.json`：
-   - `holdings`：按你的实际持仓填 `amount`（金额）。**每次手动交易后请更新对应金额**，这是组合检查的基础。
-   - 场内 ETF 填 `code`（如 `"510300"`），场外基金填 `fund_code`（如 `"003358"`），程序会自动显示最新净值与涨跌。
-   - `target`：目标配置比例（默认 权益45% / 债券45% / 黄金10%，含现金并入债券）
-   - `rebalance_band`：偏离阈值（默认 5 个百分点，低于阈值不触发再平衡）
-   - `push`：选择推送渠道
-
-3. 推送渠道二选一（或先不配，报告会存到本地 `reports/`）：
-   - **企业微信机器人**（推荐，免费）：企业微信 → 群 → 添加机器人 → 复制 webhook，填入 `wecom_webhook`，`channel` 设为 `"wecom"`
-   - **Server酱**：https://sct.ftqq.com 注册获取 SendKey，填入 `serverchan_key`，`channel` 设为 `"serverchan"`
-
-4. 注册定时任务：右键以管理员身份运行 PowerShell，执行
-   `powershell -ExecutionPolicy Bypass -File register_task.ps1`
-   然后保持电脑在工作日 15:35 处于开机状态。
+1. `pip install -r requirements.txt`（akshare==1.18.81 已锁定）
+2. 编辑 `config.json`（见 config.example.json 结构）
+3. `python main.py --push-off` 试运行 → `python main.py` 正式推送
 
 ## 常用命令
 
 ```powershell
-python main.py --push-off          # 试运行，只生成报告不推送
-python main.py                     # 正常运行（按 config 推送）
-schtasks /Run /TN MarketAdvisorDaily   # 手动触发计划任务
-Get-ScheduledTask -TaskName MarketAdvisorDaily   # 查看任务状态
-Unregister-ScheduledTask -TaskName MarketAdvisorDaily   # 删除任务
+python main.py --push-off      # 试运行，只生成报告不推送
+python main.py                 # 正常（按 config 推送）
+python test_tp.py              # 止盈算法 15 场景单测
 ```
 
-## 决策规则（透明公开，改 `main.py` 即可调整）
+## 决策规则（透明公开，rules.py 权威，AI 无权修改）
 
-- **权益**：按指数 PE 十年分位（<30% 加1分 / 30-50% 加0.5 / 50-70% 0 / 70-85% 减0.5 / >85% 减1）+ 价格 vs 120日均线（±0.5）+ 20日动量（|涨跌|>3% ±0.5），各指数取平均 → 增配/略增/持有/略减/减配
-- **债券**：10年期国债收益率十年分位，<30% 债价偏贵略减，>70% 债价便宜可增
-- **黄金**：价格 vs 120日均线，趋势跟随（卫星仓，控制在目标比例内）
-- **再平衡**：实际比例偏离目标 ≥ 5pp 才触发，金额四舍五入到百元，买入建议分批 2-3 周执行
+- **权益目标**：沪深300 PE分位阶梯（≥95%→5% / ≥90%→20% / ≥80%+动量负→30%）+ 中证500（≥75%+动量<-5%→5%）+ 创业板50代理（≥90%→5%）→ **MIN-MERGE 取最保守**；EP 安全阀动态阈值（随10年国债分位 5%~15%）；AI 可在浮动带内微调（预警期禁用）
+- **市场预警 STORM-5**：权益目标触及5%且由阶梯信号触发 → 买入冻结
+- **动态止盈 V2.2**：`T_eff=clamp(min(T_pre,T_cap),6%,30%)`，T_pre=T_base×F_vol×F_hold×F_sector；上限门按基准分位压缩；三档穿越（单向取最高档）+峰值回撤保护+短仓地板+费后口径+<7天份额豁免；**影子模式6个月观察期（2026-08-06起），信号仅记录不执行**；近5交易日同档位去重
+- **再平衡**：偏离目标区间触发；**无止损**（客户不买个股无爆仓风险，回撤保护兜底）
+- **买入约束**：市场预警冻结 / 冷却期 / 在途资金未到账不可用 / 关注池零持仓可推荐买入（评分排序+余额约束）
+- **基准对比**：沪深300+中证全债按目标配置复合基准，输出 alpha/beta/信息比率
 
-## 数据源（已实测连通并设为长期源）
+## 数据源（49 项，全部免费，失败自动降级）
 
-| 数据 | 来源 | 用途 |
-|---|---|---|
-| 指数/ETF K线+实时价 | 腾讯行情 | 市场速览、趋势判断、持仓实时表现 |
-| 指数 PE 历史（10年） | 乐咕乐股 | 估值温度、权益信号 |
-| 全市场 PE | 乐咕乐股 | 估值温度补充 |
-| 中美国债收益率 | 英为财情 | 债市研判、利率分位 |
-| 上海金 Au99.99 | 上金所官方 | 黄金趋势 |
-| 标普500（隔夜） | 新浪财经 | 外盘情绪参考 |
-| 财联社电报 | 财联社 | 每日市场要闻 |
-| LPR（1Y/5Y） | 央行（AkShare） | 政策利率环境 |
-| 美元/人民币 | 外汇牌价 | 汇率参考 |
-| 融资融券余额（沪市） | 上交所 | 杠杆情绪 |
-| 场外基金净值 | 天天基金 | 持仓中场外基金的净值/涨跌 |
+| 数据 | 来源（主→备） |
+|---|---|
+| 指数行情 | 腾讯 → akshare |
+| 指数 PE 分位 | 乐咕（沪深300/中证500/上证红利/创业板50） |
+| 基金净值/仓位/HHI | 天天基金（净值+股票仓位穿透+转债+行业配置） |
+| 基金资料/费率/业绩 | 雪球 |
+| 黄金 | 上金所 Au99.99 → 沪金主力 AU0 |
+| 债券收益率/LPR | 英为财情 → 新浪中债；央行 |
+| 宏观扩展 | 美债10Y / SC原油 / 沪铜 / CPI / PPI / PMI / 社融 |
+| 新闻 | 财联社电报 |
+| 汇率/两融/标普 | 外汇牌价 / 上交所 / 新浪 |
 
-全部免费、无需注册、自动重试；任一源失效不影响整体运行。
+## 测试与质量
 
-## 已评估但未采用的数据源（结论）
-
-- **东财接口（akshare 系列 em）**：数据最全，但高频率请求会被断连限流（实测），仅保留低频调用（场外基金净值）
-- **新浪 A 股指数 K线**：偶发超时，仅用于美股指数（该接口稳定）
-- **yfinance / Yahoo**：国内连通性差；若需美股行情优先用新浪美股源
-- **SEC EDGAR / Hacker News**：连通正常，但面向美股/科技，对当前 A 股为主的配置无增量，留作扩展
-- **Econdb / Finnhub / AllTick / TwelveData / Marketstack / Alpha Vantage / Polygon / Tushare / iFinD / Wind / Choice / 聚宽 / 米筐**：需注册或付费，免费额度对"每日一次"场景过剩；未来若加美股实时行情，首选 Finnhub 免费层（60次/分）
-- **AI Agent / RAG / 向量库 / MCP 架构**：当前是规则引擎，透明可审计、无需 Key，保持简单优先；未来若加"新闻→情绪→调仓"AI 层，推荐路径：财联社电报（已有）→ DeepSeek 摘要 → 微信推送，暂不需要向量库
+- `test_tp.py`：止盈算法 15 场景单测（动态档位基准），改动 rules.py 后必须全过
+- 数据新鲜度校验：净值/行情滞后自动标注+头部警告；核心数据严重缺失红字提示
+- 顶层异常兜底：任何崩溃输出降级报告并推送
+- 报告末尾「系统运行状态」板块：49 项数据源成败一览
 
 ## 免责声明
 
