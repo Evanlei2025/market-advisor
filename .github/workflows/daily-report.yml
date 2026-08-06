@@ -7,7 +7,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   report:
@@ -35,10 +41,36 @@ jobs:
           TQDM_DISABLE: '1'
         run: python main.py
 
+      - name: Commit back (knowledge base traces)
+        run: |
+          git config user.name "market-advisor-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add knowledge_base/
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+          else
+            git commit -m "kb: update $(date +%Y-%m-%d)"
+            git push
+          fi
+
       - name: Upload report archive
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-archive
-          path: reports/*.md
+          path: |
+            reports/*.md
+            reports/*.html
           retention-days: 90
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: reports
+
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

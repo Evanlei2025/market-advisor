@@ -1,54 +1,170 @@
 {
   "push": {
-    "channel": "none",
+    "channel": "serverchan",
     "wecom_webhook": "",
     "serverchan_key": ""
   },
   "target": {
-    "equity": 0.4,
-    "bond": 0.5,
-    "cash": 0.1
+    "equity": {"base": 0.4, "band": 0.05},
+    "cash": {"base": 0.1, "band": 0.05}
   },
   "rules": {
-    "stop_loss": {
-      "equity": 0.18,
-      "convertible": 0.1,
-      "pure_bond": 0.03,
-      "fallback": 0.25
+    "take_profit": {
+      "shadow_mode": true,
+      "base": {"equity": 0.18, "mixed": 0.12, "bond": 0.08},
+      "vol_ref": {"equity": 0.2, "mixed": 0.08, "bond": 0.02},
+      "clamp": {"lo": 0.06, "hi": 0.3},
+      "cap": {"start_pctile": 0.7, "max_reduce": 0.27},
+      "hold_factor": {"per_year": 0.15, "max_years": 3.0},
+      "hold_transition": 0.02,
+      "dd_factor": 0.35,
+      "dd_clamp": {"lo": 0.04, "hi": 0.12},
+      "fee_margin": 0.01,
+      "min_hold_days": 7,
+      "tier_gap": [0.05, 0.1],
+      "reenter": {"pp_drop": 0.15, "time_box_weeks": 26, "abs_pctile": 0.5},
+      "lock": {"weekly": true, "max_drift_pp": 0.03}
     },
-    "take_profit_1y": 0.25,
     "equity_ladder": [
-      { "pe_pctile": 0.8, "mom_neg": true, "target": 0.3 },
-      { "pe_pctile": 0.9, "target": 0.2 },
-      { "pe_pctile": 0.95, "target": 0.05 }
+      {"pe_pctile": 0.8, "mom_neg": true, "target": 0.3},
+      {"pe_pctile": 0.9, "target": 0.2},
+      {"pe_pctile": 0.95, "target": 0.05}
     ],
-    "csi500": { "pe_pctile": 0.75, "mom_20d": -0.05, "target": 0.05 },
+    "csi500": {"pe_pctile": 0.75, "mom_20d": -0.05, "target": 0.05},
     "ep_premium_years": 5,
-    "ep_premium_cap": { "pctile": 0.1, "equity_cap": 0.1 },
+    "ep_premium_cap": {"pctile": 0.1, "equity_cap": 0.1},
     "convertible_exposure_ratio": 0.5,
     "min_order_amount": 100,
-    "unlock_first_day_ratio": 1.0,
-    "unlock_volatility_cap": null
+    "buy_freeze": {
+      "unlock_first_day_ratio": 1.0,
+      "unlock_volatility_cap": null
+    },
+    "cooldown": {"default_days": 5}
   },
-  "news_watch": {
-    "industries": ["半导体", "医药", "消费", "地产", "银行", "军工", "新能源", "汽车", "AI", "人工智能", "机器人"],
-    "macro_kw": ["加息", "降息", "制裁", "战争", "冲突", "违约", "挤兑", "流动性", "紧急", "熔断", "暂停交易", "退市", "立案调查", "监管", "处罚"]
+  "settlement": {
+    "default": {
+      "redeem_confirm_days": 1,
+      "redeem_cash_days": 2,
+      "buy_confirm_days": 1
+    },
+    "per_platform": {
+      "招商证券": {
+        "redeem_confirm_days": 1,
+        "redeem_cash_days": 2,
+        "buy_confirm_days": 1
+      }
+    },
+    "per_product": {}
   },
   "portfolio": {
-    "name": "标准跟随组合",
-    "scale": 50000,
+    "name": "客户组合",
     "follow_units": 1
   },
   "products": [
-    { "code": "P001", "name": "", "type": "bond", "fund_code": "003358", "platform": "", "notes": "" },
-    { "code": "P002", "name": "", "type": "money", "fund_code": "000198", "platform": "", "notes": "" },
-    { "code": "P003", "name": "", "type": "gold", "fund_code": "000217", "platform": "", "notes": "" }
+    {
+      "code": "003504",
+      "name": "景顺长城景颐丰利债券A",
+      "type": "bond",
+      "fund_code": "003504",
+      "platform": "招商证券",
+      "status": "observe",
+      "bench_index": "csi300",
+      "notes": "已清仓，零持仓·仅观察"
+    },
+    {
+      "code": "014846",
+      "name": "博时恒乐债券A",
+      "type": "bond",
+      "fund_code": "014846",
+      "platform": "招商证券",
+      "status": "held",
+      "bench_index": "",
+      "notes": ""
+    },
+    {
+      "code": "006195",
+      "name": "国金量化多因子股票A",
+      "type": "equity",
+      "fund_code": "006195",
+      "platform": "招商证券",
+      "status": "held",
+      "bench_index": "csi500",
+      "notes": ""
+    }
   ],
   "holdings": [
-    { "name": "沪深300ETF(510300)", "code": "510300", "type": "equity", "amount": 50000, "buy_date": "2026-01-05" },
-    { "name": "中证红利ETF(515080)", "code": "515080", "type": "equity", "amount": 30000, "buy_date": "2026-01-05" },
-    { "name": "场外债券基金", "code": "", "fund_code": "", "type": "bond", "amount": 80000, "yield_pct": 3.0, "buy_date": "2026-01-05" },
-    { "name": "黄金ETF(518880)", "code": "518880", "type": "gold", "amount": 20000, "buy_date": "2026-01-05" },
-    { "name": "货币基金/现金", "code": "", "type": "cash", "amount": 10000, "yield_pct": 1.6 }
-  ]
+    {
+      "name": "博时恒乐债券A",
+      "fund_code": "014846",
+      "type": "bond",
+      "shares": 1407.3,
+      "cost": 1706.53,
+      "buy_date": "2025-09-15",
+      "lots": [
+        {"buy_date": "2025-09-15", "shares": 830.14, "cost": 1000.6},
+        {"buy_date": "2026-03-03", "shares": 412.81, "cost": 506.83},
+        {"buy_date": "2026-03-05", "shares": 164.35, "cost": 200.12}
+      ]
+    },
+    {
+      "name": "国金量化多因子股票A",
+      "fund_code": "006195",
+      "type": "equity",
+      "shares": 233.55,
+      "cost": 667.7,
+      "buy_date": "2025-09-15",
+      "lots": [
+        {"buy_date": "2025-09-15", "shares": 233.55, "cost": 667.7}
+      ]
+    },
+    {
+      "name": "货币基金/现金",
+      "type": "cash",
+      "amount": 0,
+      "yield_pct": 1.6
+    }
+  ],
+  "transactions": [
+    {
+      "code": "006195",
+      "side": "赎回",
+      "shares": 116.78,
+      "apply_date": "2026-08-05",
+      "confirm_date": "2026-08-06",
+      "settle_date": "2026-08-10",
+      "note": "用户自行操作，占原持仓1/3"
+    }
+  ],
+  "news_watch": {
+    "industries": [
+      "半导体",
+      "医药",
+      "消费",
+      "地产",
+      "银行",
+      "军工",
+      "新能源",
+      "汽车",
+      "AI",
+      "人工智能",
+      "机器人"
+    ],
+    "macro_kw": [
+      "加息",
+      "降息",
+      "制裁",
+      "战争",
+      "冲突",
+      "违约",
+      "挤兑",
+      "流动性",
+      "紧急",
+      "熔断",
+      "暂停交易",
+      "退市",
+      "立案调查",
+      "监管",
+      "处罚"
+    ]
+  }
 }

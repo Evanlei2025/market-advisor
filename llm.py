@@ -43,15 +43,21 @@ SYSTEM_PROMPT = """你是投顾日报的"指令解读员"与"风险提示员"，
 
 ## 语言要求
 - 面向一般客户：用大白话，术语首次出现必须用类比解释（如"最大回撤——历史上从高点最多跌了多少"）
+- **因果配额**：每个板块最多 1 句"为什么"——解释指标变化如何影响决策（如"PE 分位高=买贵了，所以减少股票"），必须绑定快照中的数值，句式"因为…所以…"
 - 短句纪律：每句不超过20字，句号或分号后必须换行
 - 语气客观克制，不制造焦虑，不使用感叹号和营销话术
 
 ## 指令解读板块（action）——沙箱三类允许内容，只准输出以下三类
 1. **指令复述与确认**：如"今日卖出 006195 国金量化多因子股票A，金额 10,000 元。这是系统发出的确定性指令。"
-2. **触发原因解释（必须绑定规则 ID）**：格式"[触发规则: SL-EQ-18] 006195 净值距250日高点回撤已达-20.0%，超过18%止损线，规则要求无条件清仓。"
+2. **触发原因解释（必须绑定规则 ID）**：格式"[触发规则: TP-YIELD-1] 持有收益已达 19.2%，超过动态目标线 18%，规则建议卖出 1/3。"
    - 规则 ID 只能引用"CRO 基线叙事"和"今日触发的规则ID列表"中真实存在的，禁止自造
-3. **纪律成本风险提示**：如"清仓后市场可能反弹，这是纪律必须承担的成本。历史回测中，坚守止损规则能显著降低极端回撤风险。"
+3. **纪律成本风险提示**：如"落袋后市场可能继续上涨，这是纪律必须承担的成本。"
    - 禁止在风险提示中隐含"可以不执行"或"建议等待更好时机"的暗示
+
+## 动态目标微调（唯一允许 AI 参与决策的字段）
+- 字段 `equity_target_advice`：可输出一个"权益目标仓位建议"百分比数字（0~1 或 0~100）。
+- 约束：该值**必须落在"权益目标浮动区间"内**（快照提供）；超出区间的值视为废稿，系统回退规则引擎基准。
+- 依据：知识库中产品的持仓/风格概况 + 快照中的估值/性价比数据；必须自圆其说（给出不超过 40 字理由）。
 
 ## 严格禁止
 - 任何操作动作建议（"建议分2次买入""可以考虑逢低加仓"）
@@ -61,22 +67,30 @@ SYSTEM_PROMPT = """你是投顾日报的"指令解读员"与"风险提示员"，
 
 ## 各板块解读纪律
 - **债券纪律**：债券解读必须与"CRO 基线叙事"完全一致。指令买入债券时，必须解读为"组合风险管理驱动的战略配置（非主动看多债市）"；严禁输出相悖观点，严禁"配置价值显现""债市可增""建议加仓债券"等战术看多措辞
+- **止盈信号纪律**：影子模式期间的止盈信号必须解读为"观察期信号，仅记录暂不执行"，严禁暗示"可以悄悄执行"
 - **去重纪律**：各板块解读禁止复述自己板块数据行已列出的数值（数据行客户已看到）；每板块最多引用1个数值支撑观点
 - **数据缺失纪律**：某板块缺失时写"今日该板块数据未更新"，严禁编造
 - **产品解读纪律**：products 中每条 advice 只针对本产品，不得提及其他产品编号或名称
 
 ## 长度硬约束（超出即废稿）
-market/valuation/bond/gold/macro 各≤70字；action≤170字；risk 每条≤45字；产品解读每条≤70字。
+market/valuation/bond/gold/macro 各≤70字；action≤200字；risk 每条≤45字；产品解读每条≤70字。
+
+## 行业与产品关注（recommendations）
+- 输出近期值得关注的行业（或关注池内产品），最多 5 项；不涉及个股。
+- 每条 reason 必须引用快照中的数值（如"PMI 53.0 站上荣枯线"），≤50 字。
+- 无值得推荐时输出空数组 []。宁缺毋滥。
 
 ## 输出格式
 只输出一个 JSON 对象（不要输出任何其他文字、不要 markdown 代码块）：
 {
-  "market": "市场概览解读（≤70字）",
-  "valuation": "估值温度解读（≤70字）",
+  "market": "市场概览解读（≤70字，含1句为什么）",
+  "valuation": "估值温度解读（≤70字，含1句为什么）",
   "bond": "债市解读（≤70字，与CRO基线叙事一致）",
   "gold": "黄金解读（≤70字）",
   "macro": "宏观与资金面解读（≤70字）",
-  "action": "今日指令解读（≤170字，仅三类允许内容：指令复述/触发原因[绑定规则ID]/纪律成本风险提示）",
+  "action": "今日指令解读（≤200字，仅三类允许内容）",
+  "equity_target_advice": {"value": 0.38, "reason": "（≤40字，理由简洁）"},
+  "recommendations": [{"industry": "行业/产品名", "reason": "（≤50字，引用快照数值）"}],
   "products": [
     {"code": "产品编号", "advice": "该产品的指令解读（≤70字，结合费用与排名，只针对本产品）"}
   ],
@@ -111,8 +125,18 @@ def build_user_prompt(ctx):
         f"- 黄金: {fmt_sig(ctx.get('gold', {}))}",
         f"- 宏观: {fmt_sig(ctx.get('macro', {}))}",
         "",
+        "## 权益目标浮动区间（AI 微调唯一允许的决策字段）",
+        f"- 浮动区间: {ctx.get('equity_band', '未提供')}（equity_target_advice 必须落在该区间内）",
+        f"- 规则引擎基准: {ctx.get('equity_target', '未提供')}",
+        "",
+        "## 止盈信号（影子模式，仅记录）",
+        f"- {ctx.get('tp_signal_text', '今日无止盈信号')}",
+        "",
         "## 理财产品数据（静态程序采集，权威数值，解读必须逐字引用）",
         "\n".join(product_lines) if product_lines else "- 今日无产品数据",
+        "",
+        "## 知识库产品档案摘要（辅助理解产品特性，不作为指令来源）",
+        f"- {ctx.get('kb_summary', '无档案')}",
         "",
         "## 规则引擎今日跟投指令（权威结论，你必须原样解释，不得修改、不得质疑）",
         f"- 指令清单: {ctx.get('order_book', '无')}",
@@ -123,7 +147,7 @@ def build_user_prompt(ctx):
         "",
         "## CRO 基线叙事（ChiefRulesOfficer 的权威叙述，你的解读必须与其精神一致，不得产生相悖观点）",
         f"- {ctx.get('cro_headline', '无')}",
-        f"- 状态行: {ctx.get('storm_status_line') or ctx.get('ep_status_line') or '今日无风暴/战略防御状态'}",
+        f"- 状态行: {ctx.get('storm_status_line') or ctx.get('ep_status_line') or '今日无预警/防御状态'}",
         f"- 叙事段: {ctx.get('cro_narrative', '无')}",
         "",
         "## 今日触发的规则ID列表（Gatekeeper 白名单：解读中出现的所有规则ID只能来自这里）",
@@ -242,7 +266,7 @@ def insert_insights(report, insights, product_names=None, ctx=None):
                 "ep_status_line", "cro_headline", "cro_narrative"):
         v = ctx.get(key)
         if isinstance(v, dict):
-            v = " ".join(str(x) for x in v.values())
+            v = " ".join(f"{k}{x}" for k, x in v.items())
         if v:
             snap_parts.append(str(v))
     for p in ctx.get("products", []):
@@ -313,6 +337,31 @@ def insert_insights(report, insights, product_names=None, ctx=None):
     if storm_risk:
         tail.append(f"{len(risks) + 1}. {storm_risk}")
 
+    # ---- 行业与产品关注（AI 推荐 ≤5，经 Gatekeeper 硬过滤） ----
+    recs = insights.get("recommendations") or []
+    rec_lines = []
+    if recs:
+        rec_lines.append("")
+        rec_lines.append("## 行业与产品关注")
+        rec_lines.append("*基于当日数据与知识库研判，仅供参考，不构成投资建议。*")
+        shown = 0
+        for r in recs[:5]:
+            name = str(r.get("industry") or r.get("product") or "").strip()
+            txt = str(r.get("reason") or r.get("text") or "").strip()
+            if not name or not txt:
+                continue
+            ai, audit = filtered(f"{name}：{txt}")
+            if ai is None:
+                continue
+            for a in audit:
+                log_audit(a)
+            rec_lines.append("")
+            rec_lines.append(f"**{name}**")
+            rec_lines.append(f"> {ai}")
+            shown += 1
+        if shown == 0:
+            rec_lines = []
+
     out = []
     if block_map.get("## 市场速览") is not None:
         out.append("## 市场速览" + block_map["## 市场速览"])
@@ -322,6 +371,20 @@ def insert_insights(report, insights, product_names=None, ctx=None):
         if body.strip():
             out.append(title + body)
             out.append("")
+
+    # 今日指令解读：静态占位板块缺失时追加（AI 可用场景）
+    if not any(k.startswith("## 今日指令解读") for k in block_map) and insights.get("action"):
+        ai, audit = filtered(insights["action"])
+        if ai is None:
+            ai = ctx.get("cro_narrative") or ""
+        for a in audit:
+            log_audit(a)
+        if ai:
+            out.append("## 今日指令解读")
+            out.append(f"> {ai.strip()}")
+            out.append("")
+
+    out.extend(rec_lines)
     out.extend(product_lines)
     out.extend(tail)
     out.append("")

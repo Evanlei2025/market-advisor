@@ -1,0 +1,82 @@
+[
+  {
+    "T_eff": 0.2148,
+    "T_pre": 0.2755,
+    "v_bench": 0.8028771384136858,
+    "factors": {
+      "F_vol": 1.35,
+      "F_hold": 1.1336,
+      "F_sector": 1.0
+    },
+    "signal_date": "2026-08-06",
+    "execute_date": "",
+    "fee_net_return": 0.0732,
+    "code": "006195",
+    "action": "tp_dd",
+    "shadow": true
+  },
+  {
+    "T_eff": 0.2148,
+    "T_pre": 0.2755,
+    "v_bench": 0.8028771384136858,
+    "factors": {
+      "F_vol": 1.35,
+      "F_hold": 1.1336,
+      "F_sector": 1.0
+    },
+    "signal_date": "2026-08-06",
+    "execute_date": "",
+    "fee_net_return": 0.0732,
+    "code": "006195",
+    "action": "tp_dd",
+    "shadow": true
+  },
+  {
+    "T_eff": 0.2148,
+    "T_pre": 0.2755,
+    "v_bench": 0.8028771384136858,
+    "factors": {
+      "F_vol": 1.35,
+      "F_hold": 1.1336,
+      "F_sector": 1.0
+    },
+    "signal_date": "2026-08-06",
+    "execute_date": "",
+    "fee_net_return": 0.0732,
+    "code": "006195",
+    "action": "tp_dd",
+    "shadow": true
+  },
+  {
+    "T_eff": 0.2148,
+    "T_pre": 0.2755,
+    "v_bench": 0.8028771384136858,
+    "factors": {
+      "F_vol": 1.35,
+      "F_hold": 1.1336,
+      "F_sector": 1.0
+    },
+    "signal_date": "2026-08-06",
+    "execute_date": "",
+    "fee_net_return": 0.0732,
+    "code": "006195",
+    "action": "tp_dd",
+    "shadow": true
+  },
+  {
+    "T_eff": 0.2148,
+    "T_pre": 0.2755,
+    "v_bench": 0.8028771384136858,
+    "factors": {
+      "F_vol": 1.35,
+      "F_hold": 1.1336,
+      "F_sector": 1.0
+    },
+    "signal_date": "2026-08-06",
+    "execute_date": "",
+    "fee_net_return": 0.0732,
+    "code": "006195",
+    "action": "tp_dd",
+    "shadow": true
+  }
+]

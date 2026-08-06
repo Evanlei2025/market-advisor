@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "updated": "2026-08-06",
+  "products": [
+    {
+      "code": "003504",
+      "name": "景顺长城景颐丰利债券A",
+      "status": "observe",
+      "platform": "招商证券",
+      "bench_index": "csi300",
+      "notes": "已清仓，零持仓·仅观察，持续跟踪逢机提醒买入"
+    },
+    {
+      "code": "014846",
+      "name": "博时恒乐债券A",
+      "status": "held",
+      "platform": "招商证券",
+      "bench_index": "",
+      "notes": "三笔建仓（2025-09/2026-03），份额 1407.30"
+    },
+    {
+      "code": "006195",
+      "name": "国金量化多因子股票A",
+      "status": "held",
+      "platform": "招商证券",
+      "bench_index": "csi500",
+      "notes": "2026-08-05 用户自行赎回 116.78 份（1/3），剩余 233.55 份；在途资金 2026-08-10 到账"
+    }
+  ]
+}

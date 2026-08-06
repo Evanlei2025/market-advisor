@@ -1,41 +1,40 @@
 # -*- coding: utf-8 -*-
 """确定性策略引擎：今日跟投指令的生成者。
 输入必须是数据，输出必须是确定的仓位操作。AI 无权修改本模块的输出。
+V2.2：市值口径算账、动态止盈（上限门+峰值回撤保护+短仓地板+费后口径）、
+买入冻结（原风暴锁，仅保留最保守仓位档）、关注池买入（含零持仓）、冷却期。
 """
 import math
 
-# ---- 规则 ID 体系（架构师 v1.0：AdvisorGatekeeper 白名单同源） ----
+# ---- 规则 ID 体系（AdvisorGatekeeper 白名单同源；对外人话解释见 narrative） ----
 RULE_IDS = {
-    "SL-EQ-18": "止损-权益型18%",
-    "SL-CB-10": "止损-含转债10%",
-    "SL-PB-3": "止损-纯债3%",
-    "SL-FB-25": "止损-兜底25%",
-    "TP-25": "止盈-1年25%+20日动量转负",
+    "TP-YIELD-1": "止盈-首档卖1/3",
+    "TP-YIELD-2": "止盈-次档再1/3",
+    "TP-YIELD-3": "止盈-末档卖剩余",
+    "TP-DD": "止盈-回撤保护清仓",
     "LAD-CSI300-80": "沪深300阶梯上限30%",
     "LAD-CSI300-90": "沪深300阶梯上限20%",
     "LAD-CSI300-95": "沪深300阶梯上限5%",
     "LAD-CSI500-75": "中证500阶梯上限5%",
     "MIN-MERGE": "最保守合并",
     "EP-CAP-10": "EP安全阀(权益≤10%)",
-    "STORM-5": "风暴锁-最保守仓位5%",
-    "STORM-STOP": "风暴锁-无条件清仓",
+    "STORM-5": "市场预警-最保守仓位5%",
     "REB-EQ": "再平衡-买入权益",
     "REB-BOND": "再平衡-买入固收",
+    "BUY-NEW": "关注池-买入",
 }
 
 
 def _trig(rid, text):
-    """结构化触发器：{id, text}，供触发链追溯与 Gatekeeper ID 白名单"""
     return {"id": rid, "text": text}
 
 
+# ---------------- 权益目标（阶梯 + EP + 动态区间） ----------------
 def equity_target(cfg, ctx):
-    """计算今日权益目标仓位（最保守原则 + 股债性价比锁定）
-    返回 (target, triggers[list of {id, text}])
-    ctx: csi300_pe_pctile, csi300_mom20, csi500_pe_pctile, csi500_mom20, ep_premium_pctile
-    """
-    ladder = cfg.get("rules", {}).get("equity_ladder", [])
-    base = cfg.get("target", {}).get("equity", 0.40)
+    """计算今日权益目标（最保守原则 + 股债性价比锁定）。
+    返回 (target, triggers)；target 为区间基准值，由调用方套 target.band 形成区间。"""
+    base = cfg.get("target", {}).get("equity", {})
+    base_val = base.get("base", 0.40) if isinstance(base, dict) else base
     triggers = []
     candidates = []
 
@@ -45,14 +44,11 @@ def equity_target(cfg, ctx):
         level = None
         rid = None
         if p300 >= 0.95:
-            level = 0.05
-            rid = "LAD-CSI300-95"
+            level, rid = 0.05, "LAD-CSI300-95"
         elif p300 >= 0.90:
-            level = 0.20
-            rid = "LAD-CSI300-90"
+            level, rid = 0.20, "LAD-CSI300-90"
         elif p300 >= 0.80 and m300 < 0:
-            level = 0.30
-            rid = "LAD-CSI300-80"
+            level, rid = 0.30, "LAD-CSI300-80"
         if level is not None:
             candidates.append(level)
             triggers.append(_trig(rid, f"沪深300 PE分位 {p300*100:.0f}%（动量{m300:+.1%}）→ 权益上限 {level*100:.0f}%"))
@@ -65,10 +61,9 @@ def equity_target(cfg, ctx):
             triggers.append(_trig("LAD-CSI500-75",
                                   f"中证500 PE分位 {p500*100:.0f}% 且 20日动量 {m500:+.1%} < -5% → 权益上限 5%"))
 
-    target = min(candidates) if candidates else base
+    target = min(candidates) if candidates else base_val
     if candidates:
-        triggers.append(_trig("MIN-MERGE",
-                              f"最保守原则：最终权益目标 = min(各规则值) = {target*100:.0f}%"))
+        triggers.append(_trig("MIN-MERGE", f"最保守原则：最终权益目标 = min(各规则值) = {target*100:.0f}%"))
 
     ep = ctx.get("ep_premium_pctile")
     if ep is not None:
@@ -82,223 +77,459 @@ def equity_target(cfg, ctx):
     return target, triggers
 
 
-def storm_lock(eq_target, triggers, products_status):
-    """风暴安全锁前置判定（架构师 v1.0：仅两条，EP 不纳入）。
-    - STORM-5: equity_target == 5% 且由阶梯信号（CSI300≥95% 或 CSI500≥75%+动量<-5% 或 min 合并）导致；
-      EP 压制到 10% 的情况天然不会等于 5%，明确排除。
-    - STORM-STOP: 任一产品触发无条件清仓（硬止损）。
-    返回 (active: bool, reasons: list[str])
+def target_band(cfg, center=None):
+    """权益目标浮动带（±band pp），供 AI 微调。以规则目标（center）为中心；
+    无 center 时以配置 base 为中心。返回 (lo, hi)"""
+    t = cfg.get("target", {}).get("equity", {})
+    base = t.get("base", 0.40) if isinstance(t, dict) else 0.40
+    band = t.get("band", 0.05) if isinstance(t, dict) else 0.05
+    c = center if center is not None else base
+    return max(0.0, c - band), min(1.0, c + band)
+
+
+def clamp_equity_target(cfg, value, center=None):
+    """AI 建议的权益目标必须落在浮动带内（Gatekeeper 同源校验）"""
+    lo, hi = target_band(cfg, center)
+    try:
+        v = float(value)
+    except Exception:
+        v = None
+    if v is None or v != v:
+        return None
+    if v < lo or v > hi:
+        return None
+    return v
+
+
+def storm_lock(eq_target, triggers):
+    """市场预警（买入冻结）前置判定（V2.2：仅最保守仓位档）。
+    触发：权益目标 == 5% 且由阶梯信号（CSI300≥95% 或 CSI500≥75%+动量）导致。
+    返回 (active: bool, reasons: list[str])；EP 压制到 10% 天然不会等于 5%，明确排除。
     """
     reasons = []
     ids = {t.get("id") for t in triggers}
     if eq_target == 0.05 and (ids & {"LAD-CSI300-95", "LAD-CSI500-75"}):
         reasons.append("STORM-5")
-    if any(ps.get("action") == "sell_all" for ps in products_status.values()):
-        reasons.append("STORM-STOP")
     return bool(reasons), reasons
 
 
-def stop_loss_level(cfg, equity_exposure):
-    """按实际权益暴露度分级止损线（距250日高点回撤阈值）"""
-    sl = cfg.get("rules", {}).get("stop_loss", {})
-    if equity_exposure is None:
-        return sl.get("fallback", 0.25)
-    if equity_exposure >= 0.80:
-        return sl.get("equity", 0.18)
-    if equity_exposure >= 0.05:
-        return sl.get("convertible", 0.10)
-    return sl.get("pure_bond", 0.03)
+# ---------------- 动态止盈算法 V2.2 ----------------
+def _equity_class(exposure):
+    if exposure is None:
+        return "equity"
+    if exposure >= 0.8:
+        return "equity"
+    if exposure >= 0.2:
+        return "mixed"
+    return "bond"
 
 
-def stop_loss_rule_id(cfg, equity_exposure):
-    """止损命中的规则 ID（SL-EQ-18 / SL-CB-10 / SL-PB-3 / SL-FB-25）"""
-    if equity_exposure is None:
-        return "SL-FB-25"
-    if equity_exposure >= 0.80:
-        return "SL-EQ-18"
-    if equity_exposure >= 0.05:
-        return "SL-CB-10"
-    return "SL-PB-3"
+def _sigma_ref(cfg, exposure):
+    """σ_ref 按权益暴露度线性插值（0.02 ↔ 0.08 ↔ 0.20），消除档位跳变"""
+    vr = cfg.get("rules", {}).get("take_profit", {}).get("vol_ref", {})
+    v_eq, v_mix, v_bd = vr.get("equity", 0.20), vr.get("mixed", 0.08), vr.get("bond", 0.02)
+    if exposure is None:
+        return v_eq
+    if exposure >= 0.8:
+        return v_eq
+    if exposure <= 0.2:
+        return v_mix + (v_bd - v_mix) * (0.2 - exposure) / 0.2 if exposure < 0.2 else v_mix
+    # 0.2~0.8 线性插值 mixed→equity
+    return v_mix + (v_eq - v_mix) * (exposure - 0.2) / 0.6
 
 
-def product_action(cfg, prod, ctx):
-    """单产品规则：返回 (action, detail, rule_id)
-    action: "sell_all" / "sell_half" / "hold"
-    ctx: {"nav_series": DataFrame(date,nav), "equity_exposure": 0.5}
+def ewma_vol(nav_series, lam=0.94):
+    """EWMA(λ=0.94) 日收益年化波动率。数据不足返回 None"""
+    import pandas as pd
+    try:
+        if nav_series is None or len(nav_series) < 30:
+            return None
+        rets = nav_series["nav"].pct_change().dropna()
+        if len(rets) < 20:
+            return None
+        var = rets.iloc[0] ** 2
+        for r in rets.iloc[1:]:
+            var = lam * var + (1 - lam) * r * r
+        return float(math.sqrt(var) * math.sqrt(250))
+    except Exception:
+        return None
+
+
+def _fee_rate_of(cfg, pctx, code):
+    """该产品当前赎回费率（首档），解析失败用保守 0.5%"""
+    try:
+        fees = (pctx.get("fees") or "")
+        import re
+        m = re.search(r"短期赎回([\d.]+)%", fees)
+        if m:
+            return float(m.group(1)) / 100.0
+    except Exception:
+        pass
+    return 0.005
+
+
+def compute_take_profit(cfg, pctx, ctx):
+    """计算动态止盈目标线 T_eff（V2.2 全因子）。
+    ctx: {"hold_years", "r_hold", "sigma_ann", "bench_pctile", "exposure"}
+    返回 dict {class, sigma_ann, F_vol, F_hold, F_sector, T_base, T_pre, T_cap, T_eff,
+               peak_r_hold, dd_ret, dd_thr} 或 None（数据不足）
     """
-    nav = ctx.get("nav_series")
-    if nav is None or len(nav) < 30:
-        return "hold", "数据不足，暂不触发规则", None
-    high = float(nav["nav"].max())
-    cur = float(nav["nav"].iloc[-1])
-    dd = cur / high - 1
-    stop_line = stop_loss_level(cfg, ctx.get("equity_exposure"))
-    if dd < -stop_line:
-        rid = stop_loss_rule_id(cfg, ctx.get("equity_exposure"))
-        return "sell_all", f"触发止损线：净值距250日高点回撤 {dd*100:.1f}% > {stop_line*100:.0f}% → 无条件清仓", rid
-    r1y = cur / float(nav["nav"].iloc[-251]) - 1 if len(nav) > 251 else None
-    mom20 = cur / float(nav["nav"].iloc[-21]) - 1 if len(nav) > 21 else 0.0
-    if r1y is not None and r1y > cfg.get("rules", {}).get("take_profit_1y", 0.25) and mom20 < 0:
-        return "sell_half", f"触发止盈线：近1年收益 {r1y*100:.1f}% > 25% 且 20日动量转负 → 减半锁定收益", "TP-25"
-    return "hold", f"规则未触发（距高点回撤 {dd*100:.1f}%，止损线 {stop_line*100:.0f}%）", None
+    tp = cfg.get("rules", {}).get("take_profit", {})
+    nav_series = pctx.get("nav_series")
+    if nav_series is None or len(nav_series) < 30:
+        return None
+
+    exposure = ctx.get("exposure")
+    cls = _equity_class(exposure)
+    sigma = ctx.get("sigma_ann") or ewma_vol(nav_series)
+    if sigma is None:
+        sigma = 0.20 if cls == "equity" else (0.08 if cls == "mixed" else 0.02)
+
+    vref = _sigma_ref(cfg, exposure)
+    F_vol = max(0.75, min(1.35, sigma / vref))
+
+    hold_years = ctx.get("hold_years", 1.0)
+    r_hold = ctx.get("r_hold", 0.0)
+    ht = tp.get("hold_factor", {})
+    per_year = ht.get("per_year", 0.15)
+    max_years = ht.get("max_years", 3.0)
+    trans = tp.get("hold_transition", 0.02)
+    if r_hold <= -trans:
+        F_hold = 1.0
+    elif r_hold >= trans:
+        F_hold = 1.0 + per_year * min(hold_years, max_years)
+    else:
+        F_hold = 1.0 + per_year * min(hold_years, max_years) * (r_hold + trans) / (2 * trans)
+
+    F_sector = 1.0  # v1：景气数据缺失默认中性（数据就绪后按 HHI 动态加权）
+
+    base = tp.get("base", {})
+    T_base = base.get(cls, 0.18 if cls == "equity" else (0.12 if cls == "mixed" else 0.08))
+
+    clamp_lo = tp.get("clamp", {}).get("lo", 0.06)
+    clamp_hi = tp.get("clamp", {}).get("hi", 0.30)
+    T_pre = max(clamp_lo, min(clamp_hi, T_base * F_vol * F_hold * F_sector))
+
+    # 上限门（一票否决）：v_bench ≥ 70% 起线性压缩；纯债（exposure→0）豁免
+    cap = tp.get("cap", {})
+    v_bench = ctx.get("bench_pctile")
+    T_cap = clamp_hi
+    if v_bench is not None:
+        w_bench = max(0.0, min(1.0, exposure or 0.0))
+        start = cap.get("start_pctile", 0.7)
+        max_reduce = cap.get("max_reduce", 0.27)
+        if v_bench > start:
+            T_cap = clamp_hi - max_reduce * (v_bench - start) / (1.0 - start) * w_bench
+    T_eff = max(clamp_lo, min(T_pre, T_cap))
+
+    # 峰值收益与收益回撤（回撤保护前置条件）
+    # r_hold(t) = shares×nav(t)/cost − 1，份额固定时：峰值收益 = (1+r_hold)×(peak_nav/cur_nav) − 1
+    peak_r = ctx.get("r_hold")
+    dd_ret = 0.0
+    try:
+        cur_nav = float(nav_series["nav"].iloc[-1])
+        peak_nav = float(nav_series["nav"].max())
+        if cur_nav > 0 and peak_nav > 0:
+            peak_r = (1 + ctx.get("r_hold", 0.0)) * (peak_nav / cur_nav) - 1
+            dd_ret = peak_nav / cur_nav - 1
+    except Exception:
+        pass
+    dd_thr = max(tp.get("dd_clamp", {}).get("lo", 0.04),
+                 min(tp.get("dd_clamp", {}).get("hi", 0.12),
+                     tp.get("dd_factor", 0.35) * sigma))
+    return {
+        "class": cls, "sigma_ann": sigma, "F_vol": F_vol, "F_hold": F_hold,
+        "F_sector": F_sector, "T_base": T_base, "T_pre": T_pre, "T_cap": T_cap,
+        "T_eff": T_eff, "peak_r_hold": peak_r, "dd_ret": dd_ret, "dd_thr": dd_thr,
+        "r_hold": r_hold,
+    }
 
 
-def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None, ep_lock=False):
-    """生成今日跟投指令。
-    ctx: {"equity_target": 0.3, "holdings_amount": {code: 金额}, "nav": {code: 最新净值},
-          "equity_exposure": {code: 0.5}, "product_name": {code: name},
-          "hold_days": {code: 天数} or None, "total": 总金额}
-    storm_active/ep_lock: StormLock 与 EP 战略防御状态（架构师 v1.0 分层防御）
-    返回 (orders[], target_alloc, summary)
+def _lot_adjusted(cfg, lots, today):
+    """剔除持有 < min_hold_days 的笔；返回 (可卖 lots, 豁免笔份额)"""
+    tp = cfg.get("rules", {}).get("take_profit", {})
+    min_days = int(tp.get("min_hold_days", 7))
+    from datetime import datetime
+    saleable, exempt = [], []
+    for lot in lots or []:
+        bd = str(lot.get("buy_date", ""))[:10]
+        try:
+            days = (datetime.strptime(str(today), "%Y-%m-%d").date()
+                    - datetime.strptime(bd, "%Y-%m-%d").date()).days
+        except Exception:
+            days = 9999
+        if days < min_days:
+            exempt.append(lot)
+        else:
+            saleable.append(lot)
+    return saleable, exempt
+
+
+def take_profit_signal(cfg, pctx, ctx):
+    """止盈触发判定（V2.2）：返回 (action, detail, rule_id, trace) 或 (None, ...)（无信号）
+    ctx: {"r_hold", "r_hold_prev", "hold_years", "sigma_ann", "bench_pctile",
+          "exposure", "lots", "today", "fee_rate"}
+    action: "tp_1of3"/"tp_2of3"/"tp_rest"/"tp_dd"/None
     """
+    tp = cfg.get("rules", {}).get("take_profit", {})
+    st = compute_take_profit(cfg, pctx, ctx)
+    if st is None:
+        return None, "", None, None
+
+    r_hold = ctx.get("r_hold", 0.0)
+    r_prev = ctx.get("r_hold_prev", r_hold)
+    hold_years = ctx.get("hold_years", 1.0)
+    if hold_years <= 0:
+        hold_years = 1.0
+    fee = ctx.get("fee_rate", 0.005)
+    margin = tp.get("fee_margin", 0.01)
+    gap = tp.get("tier_gap", [0.05, 0.10])
+
+    # 门槛：≤1 年按持有年数折算（带 6% 地板）；>1 年按年化
+    if hold_years <= 1.0:
+        def level_for(tev):
+            return max(tev * hold_years, 0.06)
+        r_now, r_yest = r_hold, r_prev
+    else:
+        def level_for(tev):
+            return max(tev, 0.06)
+        r_now = (1 + r_hold) ** (1.0 / hold_years) - 1
+        r_yest = (1 + r_prev) ** (1.0 / hold_years) - 1 if r_prev > -1 else r_now
+
+    lv1 = level_for(st["T_eff"]) + fee + margin
+    lv2 = level_for(st["T_eff"] + gap[0]) + fee + margin
+    lv3 = level_for(st["T_eff"] + gap[1]) + fee + margin
+
+    # 回撤保护：峰值收益曾 ≥ T_eff 且收益自高点回撤 ≥ DD_thr 且当前盈利
+    peak_r = st["peak_r_hold"]
+    dd_hit = (peak_r is not None and st["r_hold"] > 0
+              and peak_r >= st["T_eff"] and st["dd_ret"] >= st["dd_thr"])
+
+    # 单向穿越检测（基于今日 vs 昨日）
+    def crossed(level):
+        return r_yest < level and r_now >= level
+
+    action = None
+    detail = ""
+    rid = None
+    if dd_hit:
+        action, rid = "tp_dd", "TP-DD"
+        detail = (f"回撤保护：持有收益 {r_hold*100:.1f}%（峰值 {peak_r*100:.1f}% ≥ 目标线 {st['T_eff']*100:.1f}%），"
+                  f"自高点回撤 {st['dd_ret']*100:.1f}% ≥ {st['dd_thr']*100:.1f}% → 建议清仓")
+    elif crossed(lv3) or (r_now >= lv3 and r_yest >= lv2):
+        action, rid = "tp_rest", "TP-YIELD-3"
+        detail = f"末档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv3*100:.1f}%（目标线 {st['T_eff']*100:.1f}%+{gap[1]*100:.0f}%）→ 建议卖出剩余"
+    elif crossed(lv2) or (r_now >= lv2 and r_yest >= lv1):
+        action, rid = "tp_2of3", "TP-YIELD-2"
+        detail = f"次档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv2*100:.1f}%（目标线 {st['T_eff']*100:.1f}%+{gap[0]*100:.0f}%）→ 建议再卖 1/3"
+    elif crossed(lv1):
+        action, rid = "tp_1of3", "TP-YIELD-1"
+        detail = f"首档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv1*100:.1f}%（目标线 {st['T_eff']*100:.1f}%，含费后安全边际）→ 建议卖出 1/3"
+
+    trace = None
+    if action:
+        trace = {
+            "T_eff": round(st["T_eff"], 4), "T_pre": round(st["T_pre"], 4),
+            "v_bench": ctx.get("bench_pctile"), "factors": {k: round(st[k], 4)
+                                                            for k in ("F_vol", "F_hold", "F_sector")},
+            "signal_date": str(ctx.get("today", "")), "execute_date": "",
+            "fee_net_return": round(r_hold - fee, 4), "code": ctx.get("code", ""),
+            "action": action, "shadow": bool(tp.get("shadow_mode", True)),
+        }
+    return action, detail, rid, trace
+
+
+# ---------------- 订单簿（市值口径 + 关注池 + 余额约束 + 在途/冷却） ----------------
+def add_trading_days(start_date, n):
+    """日期 + n 个交易日（akshare 日历；失败按自然日）。"""
+    from datetime import timedelta
+    try:
+        import akshare as ak
+        df = ak.tool_trade_date_hist_sina()
+        cal = sorted(df["trade_date"].astype(str))
+        if str(start_date) not in cal:
+            import bisect
+            idx = bisect.bisect_left(cal, str(start_date))
+        else:
+            idx = cal.index(str(start_date))
+        idx += n
+        if 0 <= idx < len(cal):
+            return cal[idx]
+    except Exception:
+        pass
+    return (start_date + timedelta(days=int(n * 1.5))).isoformat()
+
+
+def settlement_of(cfg, product):
+    """产品结算参数：per_product > per_platform > default"""
+    st = cfg.get("settlement", {})
+    code = product.get("code", "")
+    spec = (st.get("per_product", {}) or {}).get(code)
+    if not spec:
+        spec = (st.get("per_platform", {}) or {}).get(product.get("platform", ""))
+    if not spec:
+        spec = st.get("default", {})
+    return spec
+
+
+def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
+                     ep_lock=False, cooldown_active=False, today=None):
+    """生成今日跟投指令（V2.2）。
+    ctx: {"equity_target", "mvs": {code:市值}, "shares": {code}, "costs": {code},
+          "lots": {code: [lots]}, "cash_mv", "settled_cash", "pending_cash": [...],
+          "bench_pctile": {code}, "fee_rate": {code}, "exposure": {code},
+          "r_hold": {code}, "r_hold_prev": {code}, "hold_years": {code},
+          "product_ctx": {code}, "total"}
+    返回 (orders[], target_alloc, summary_lines)
+    """
+    from datetime import date
+    today = today or date.today().isoformat()
     rules = cfg.get("rules", {})
-    target_equity = ctx.get("equity_target", cfg.get("target", {}).get("equity", 0.4))
-    target_cash = cfg.get("target", {}).get("cash", 0.10)
-    target_bond = max(0.0, 1.0 - target_equity - target_cash)
+    target_equity = ctx.get("equity_target", 0.4)
+    target_cash = cfg.get("target", {}).get("cash", {})
+    t_cash = target_cash.get("base", 0.10) if isinstance(target_cash, dict) else 0.10
+    target_bond = max(0.0, 1.0 - target_equity - t_cash)
 
-    holdings = ctx.get("holdings_amount", {})
-    nav_map = ctx.get("nav", {})
+    mvs = ctx.get("mvs", {})
+    shares = ctx.get("shares", {})
     names = ctx.get("product_name", {})
-    exposures = ctx.get("equity_exposure", {})
     total = ctx.get("total", 0) or 1
+    min_amt = float(rules.get("min_order_amount", 100))
 
     orders = []
-    stopped_cash = 0.0  # 卖出产生的现金（风暴/止盈/超配）
-    remaining = dict(holdings)  # 卖出后的剩余金额
+    cash_now = float(ctx.get("cash_mv", 0)) + float(ctx.get("settled_cash", 0))
+    remaining = dict(mvs)
+    tp_ctx_map = ctx.get("tp_ctx", {})   # {code: {action, detail, rid, trace}}
+    shadow = bool(rules.get("take_profit", {}).get("shadow_mode", True))
 
-    # 第一轮：止损/止盈（只撤不买，风暴锁不干预卖出）
+    # ---- 第一轮：止盈（撤/卖出）。影子模式下只记录信号，不生成指令 ----
+    tp_actions = {}
     for p in products:
         code = p.get("code", "")
-        amt = holdings.get(code, 0)
+        tpc = (tp_ctx_map or {}).get(code) or {}
+        act = tpc.get("action")
+        if not act:
+            continue
+        amt = remaining.get(code, 0)
         if amt <= 0:
             continue
-        action, reason, rid = product_action(cfg, p, ctx.get("product_ctx", {}).get(code, {}))
-        if action == "sell_all":
-            shares = amt / nav_map.get(code, 1)
-            orders.append({"side": "卖出", "code": code, "name": names.get(code, code),
-                           "amount": round(amt, 2), "shares": round(shares, 2),
-                           "reason": reason, "stop": True, "rule_id": rid})
-            stopped_cash += amt
-            remaining[code] = 0
-        elif action == "sell_half":
-            half = amt / 2
-            shares = half / nav_map.get(code, 1)
-            orders.append({"side": "卖出", "code": code, "name": names.get(code, code),
-                           "amount": round(half, 2), "shares": round(shares, 2),
-                           "reason": reason, "stop": False, "rule_id": rid})
-            stopped_cash += half
-            remaining[code] = amt - half
+        lots = ctx.get("lots", {}).get(code, [])
+        saleable, _exempt = _lot_adjusted(cfg, lots, today)
+        if not saleable:
+            continue
+        if act == "tp_dd":
+            frac = 1.0
+        elif act == "tp_rest":
+            frac = 1.0
+        elif act == "tp_2of3":
+            frac = 2.0 / 3.0
+        else:
+            frac = 1.0 / 3.0
+        sell_amt = round(amt * frac, 2)
+        if sell_amt < min_amt:
+            continue
+        if shadow:
+            tp_actions[code] = {"side": "信号", "amount": sell_amt,
+                                "reason": tpc.get("detail", ""), "rule_id": tpc.get("rid"),
+                                "trace": tpc.get("trace")}
+            continue
+        spec = settlement_of(cfg, p)
+        confirm = add_trading_days(today, int(spec.get("redeem_confirm_days", 1)))
+        settle = add_trading_days(confirm, int(spec.get("redeem_cash_days", 2)))
+        orders.append({
+            "side": "卖出", "code": code, "name": names.get(code, code),
+            "amount": sell_amt,
+            "shares": round(sell_amt / max(0.0001, float(ctx.get("nav", {}).get(code, 1))), 2),
+            "reason": tpc.get("detail", ""), "stop": True, "rule_id": tpc.get("rid"),
+            "confirm_date": confirm, "settle_date": settle,
+        })
+        cash_now += sell_amt
+        remaining[code] = amt - sell_amt
 
-    # 卖出后各类资产金额（现金 = 原始现金 + 卖出现金）
-    cash_now = holdings.get("cash", 0) + stopped_cash
-    equity_now = sum(remaining.get(p.get("code"), 0) for p in products
-                     if p.get("type") in ("equity", "gold"))
-    bond_now = sum(remaining.get(p.get("code"), 0) for p in products if p.get("type") == "bond")
+    # ---- 第二轮：目标仓位与关注池买入 ----
+    equity_mv = sum(v for k, v in remaining.items()
+                    if k in {p.get("code") for p in products if p.get("type") in ("equity", "gold")})
+    bond_mv = sum(v for k, v in remaining.items()
+                  if k in {p.get("code") for p in products if p.get("type") == "bond"})
 
-    # 目标金额
-    equity_target_amt = total * target_equity
-    bond_target_amt = total * target_bond
-    cash_target_amt = total * target_cash
+    eq_target_amt = total * target_equity
+    bd_target_amt = total * target_bond
+    cash_target_amt = total * t_cash
 
-    # 第二轮：再平衡
-    # 风暴锁：跳过全部买入（权益+固收），现金冻结；卖出（撤）不受限
-    # EP 防御：禁止"现金→权益"买入，固收再平衡照常
-    equity_gap = equity_target_amt - equity_now
-    if equity_gap > 0 and not storm_active and not ep_lock and stopped_cash <= 0:
-        target_eq_products = [p for p in products if p.get("type") in ("equity", "gold") and remaining.get(p.get("code"), 0) >= 0]
-        if target_eq_products:
-            code = target_eq_products[0]["code"]
-            amt = round(equity_gap, 2)
-            if amt > 100:
-                orders.append({"side": "买入", "code": code, "name": names.get(code, code),
-                               "amount": amt, "shares": None, "reason": "再平衡：权益低于目标仓位",
-                               "stop": False, "rule_id": "REB-EQ"})
-    elif equity_gap < 0 and not storm_active:
-        # 权益超配 → 卖出权益（撤，不触发风暴锁限制）；风暴日同样允许撤离风险资产
-        eq_products = [p for p in products if p.get("type") in ("equity", "gold") and remaining.get(p.get("code"), 0) > 0]
-        sell_amt = min(abs(equity_gap), sum(remaining.get(p["code"], 0) for p in eq_products))
-        if eq_products and sell_amt > 100:
-            code = eq_products[0]["code"]
-            amt = round(sell_amt, 2)
-            orders.append({"side": "卖出", "code": code, "name": names.get(code, code),
-                           "amount": amt, "shares": round(amt / nav_map.get(code, 1), 2),
-                           "reason": "再平衡：权益超配，转固收", "stop": False, "rule_id": "REB-BOND"})
-            stopped_cash += sell_amt
-            remaining[code] -= sell_amt
+    # 买入冻结（市场预警）：跳过一切买入，现金冻结（只卖不买）
+    buy_frozen = bool(storm_active) or cooldown_active
+    if not buy_frozen:
+        # 权益缺口：目标 − 当前（含在途赎回按到账后计，买入以当前可用现金为上限）
+        eq_gap = eq_target_amt - equity_mv
+        if eq_gap > 0 and not ep_lock:
+            cands = [p for p in products
+                     if p.get("type") in ("equity", "gold") and remaining.get(p.get("code"), 0) >= 0
+                     and p.get("status") in ("held", "observe")]
+            # 优先已有持仓，其次观察池
+            cands.sort(key=lambda p: (p.get("status") != "held", p.get("code", "")))
+            if cands:
+                code = cands[0]["code"]
+                amt = round(min(eq_gap, max(0.0, cash_now - cash_target_amt)), 2)
+                if amt >= min_amt:
+                    orders.append({"side": "买入", "code": code, "name": names.get(code, code),
+                                   "amount": amt, "shares": None,
+                                   "reason": "再平衡：权益低于目标仓位" + ("（关注池建仓）" if remaining.get(code, 0) <= 0 else ""),
+                                   "stop": False, "rule_id": "BUY-NEW" if remaining.get(code, 0) <= 0 else "REB-EQ"})
+                    cash_now -= amt
+                    remaining[code] = remaining.get(code, 0) + amt
 
-    # 债券再平衡：风暴锁激活时跳过（现金冻结）；买入选权益暴露最低的产品
-    bond_gap = bond_target_amt - bond_now
-    if bond_gap > 0 and not storm_active:
-        bond_candidates = [p for p in products if p.get("type") == "bond" and remaining.get(p.get("code"), 0) > 0]
-        if not bond_candidates:
-            bond_candidates = [p for p in products if p.get("type") == "bond"]
-        if bond_candidates:
-            bond_candidates.sort(key=lambda p: exposures.get(p.get("fund_code", p.get("code", "")), 1.0))
-            code = bond_candidates[0]["code"]
-            amt = round(min(bond_gap, max(0, stopped_cash + cash_now - cash_target_amt) + max(0, bond_gap)), 2)
-            if amt > 100:
-                orders.append({"side": "买入", "code": code, "name": names.get(code, code),
-                               "amount": amt, "shares": None,
-                               "reason": "再平衡：固收低于目标仓位（选权益暴露最低产品）",
-                               "stop": False, "rule_id": "REB-BOND"})
+        bd_gap = bd_target_amt - bond_mv
+        if bd_gap > 0:
+            cands = [p for p in products
+                     if p.get("type") == "bond" and p.get("status") in ("held", "observe")]
+            if not cands:
+                cands = [p for p in products if p.get("type") == "bond"]
+            if cands:
+                cands.sort(key=lambda p: ctx.get("exposure", {}).get(p.get("fund_code", p.get("code", "")), 1.0))
+                code = cands[0]["code"]
+                avail = max(0.0, cash_now - cash_target_amt)
+                amt = round(min(bd_gap, avail), 2)
+                if amt >= min_amt:
+                    orders.append({"side": "买入", "code": code, "name": names.get(code, code),
+                                   "amount": amt, "shares": None,
+                                   "reason": "再平衡：固收低于目标仓位（选权益暴露最低产品）",
+                                   "stop": False, "rule_id": "BUY-NEW" if remaining.get(code, 0) <= 0 else "REB-BOND"})
+                    cash_now -= amt
+                    remaining[code] = remaining.get(code, 0) + amt
 
-    # 现金目标：多余现金提示（买入货基由用户自行处理，不生成指令）
+    # 资金时间线（在途/挂起提示）
+    pending_lines = []
+    for pc in ctx.get("pending_cash", []) or []:
+        sd = str(pc.get("settle_date", ""))[:10]
+        pending_lines.append(f"- 在途资金：{pc.get('code')} 赎回 {pc.get('shares', 0)} 份，预计 {sd or '待确认'} 到账")
+
     summary_lines = []
     for p in products:
         code = p.get("code", "")
-        if remaining.get(code, 0) <= 0 and holdings.get(code, 0) > 0:
-            summary_lines.append(f"- {names.get(code, code)}：已清仓（{exposures.get(code, '?')*100:.0f}% 权益暴露）")
-
-    # 铁律说明三态化（架构师/内容分析师定稿文案）
+        if remaining.get(code, 0) <= 0 and ctx.get("mvs", {}).get(code, 0) > 0:
+            summary_lines.append(f"- {names.get(code, code)}：已清仓")
+    if tp_actions and shadow:
+        for code, a in tp_actions.items():
+            summary_lines.append(f"- 止盈信号（影子模式，仅记录不执行）：{names.get(code, code)} {a['amount']:,.0f} 元（{a['reason']}）")
     if storm_active:
-        if stopped_cash > 0:
-            summary_lines.append(
-                f"- 铁律执行：卖出产生现金 {stopped_cash:,.0f} 元 → 风暴锁已激活（{'/'.join(storm_reasons or ['STORM']) if storm_reasons else 'STORM'}），"
-                f"全部现金冻结，暂停一切买入（含固收）。解锁前，现金仅可停留于货基或活期。解锁后自动恢复再平衡")
-    elif ep_lock:
-        if stopped_cash > 0:
-            summary_lines.append(
-                f"- 铁律执行：权益减仓产生现金 {stopped_cash:,.0f} 元 → 固收再平衡照常执行，权益买入已被 [EP-CAP-10] 禁止。现金将按规则配置入固收产品")
-    elif stopped_cash > 0:
         summary_lines.append(
-            f"- 铁律执行：卖出产生现金 {stopped_cash:,.0f} 元 → 按规则配置入目标资产。不立即补仓权益，等待下一次规则信号")
+            f"- 市场预警：估值与动量同时达警戒（{'/'.join(storm_reasons or ['STORM-5'])}）→ 买入冻结，持有现金。"
+            f"解锁条件：下一无风险交易日自动判定")
+    elif ep_lock:
+        summary_lines.append(
+            f"- 战略防御：[EP-CAP-10] 权益上限锁定 10%，暂停权益买入；固收再平衡照常执行")
+    elif not buy_frozen and not orders and not tp_actions:
+        summary_lines.append("- 今日无规则触发，维持当前持仓")
+    elif cooldown_active and not orders and not tp_actions:
+        summary_lines.append("- 处于操作冷却期，今日不生成新买入指令")
 
-    target_alloc = {"equity": target_equity, "bond": target_bond, "cash": target_cash}
-    return orders, target_alloc, summary_lines
-
-
-def portfolio_simulator(ret_map, weights_after, total):
-    """PortfolioSimulator 前瞻风险预览（下一迭代）：
-    按调仓后金额权重模拟组合风险（现金权重×0收益，不参与归一）。
-    weights_after: {code: 调仓后金额}（含现金键）
-    返回 {"vol","max_dd","var95"} 或 None（数据不足）
-    """
-    if total <= 0:
-        return None
-    import pandas as pd
-    codes = [c for c in weights_after if c in ret_map and weights_after.get(c, 0) > 0]
-    if not codes:
-        return None
-    common = None
-    for c in codes:
-        s = ret_map[c]
-        common = s.index if common is None else common.intersection(s.index)
-    if common is None or len(common) < 30:
-        return None
-    combo = pd.DataFrame({c: ret_map[c].loc[common] for c in codes})
-    w = pd.Series({c: weights_after[c] / total for c in codes})
-    combo_ret = combo.dot(w)
-    annual_vol = float(combo_ret.std() * math.sqrt(250))
-    nav = (1 + combo_ret).cumprod()
-    max_dd = float((nav / nav.cummax() - 1).min())
-    var95 = float(combo_ret.quantile(0.05))
-    return {"vol": annual_vol, "max_dd": max_dd, "var95": var95}
+    target_alloc = {"equity": target_equity, "bond": target_bond, "cash": t_cash}
+    return orders, target_alloc, summary_lines, tp_actions
 
 
+# ---------------- 组合诊断（市值口径） ----------------
 def estimate_shares(nav_series, amount, buy_date):
-    """份额估算：amount / 建仓日净值（buy_date 当日或之前最近净值）。
-    用于市值加权组合诊断。无净值数据/无 buy_date 返回 None（回退成本金额权重）。
-    """
+    """份额估算：amount / 建仓日净值（buy_date 当日或之前最近净值）。数据不足返回 None。"""
     import pandas as pd
     if nav_series is None or len(nav_series) == 0 or not buy_date or not amount:
         return None
@@ -316,30 +547,74 @@ def estimate_shares(nav_series, amount, buy_date):
 
 
 def market_value_weights(holdings, nav_series_map, nav_latest_map):
-    """市值权重：份额×最新净值 / 总市值（现金按面值）。
-    返回 ({code: 市值}, total_mv)；份额估算失败回退成本金额。
-    """
+    """市值权重：优先 shares×最新净值 → 份额估算 → 成本回退。现金按面值。
+    返回 ({key: 市值}, total_mv)"""
     mvs = {}
     for h in holdings:
         key = h.get("fund_code") or h.get("code") or h.get("name", "")
-        amt = float(h.get("amount", 0))
         if h.get("type") == "cash" or not key:
-            mvs[key] = amt
+            mvs[key] = float(h.get("amount", 0))
             continue
-        shares = estimate_shares(nav_series_map.get(key), amt, h.get("buy_date"))
+        shares = float(h.get("shares") or 0)
         latest = nav_latest_map.get(key)
-        if shares is not None and latest:
+        if shares > 0 and latest:
             mvs[key] = shares * latest
+            continue
+        est = estimate_shares(nav_series_map.get(key), float(h.get("amount", 0)), h.get("buy_date"))
+        if est and latest:
+            mvs[key] = est * latest
         else:
-            mvs[key] = amt  # 回退成本金额
+            mvs[key] = float(h.get("amount", 0))
     total = sum(mvs.values())
     return mvs, total
 
 
-def portfolio_diagnostics(cfg, products, ctx):
-    """组合诊断：年化波动率 / 250日最大回撤 / VaR95 / 实际权益暴露度
-    ctx: {"returns": {code: 日收益Series}} 或 None（数据不足返回 None）
+def hold_metrics(holdings, nav_series_map, nav_latest_map, cost_map=None):
+    """持有收益/加权持有年数（份额台账口径）。
+    返回 ({key: {"r_hold","r_hold_prev","hold_years","cost","shares","mv"}}, total)
     """
+    from datetime import date
+    out = {}
+    for h in holdings:
+        key = h.get("fund_code") or h.get("code")
+        if h.get("type") == "cash" or not key:
+            continue
+        lots = h.get("lots") or [{"buy_date": h.get("buy_date", ""), "shares": h.get("shares", 0), "cost": h.get("cost", 0)}]
+        shares = float(h.get("shares") or sum(float(l.get("shares", 0)) for l in lots))
+        cost = float(cost_map.get(key) if cost_map else 0) or float(h.get("cost") or sum(float(l.get("cost", 0)) for l in lots))
+        latest = nav_latest_map.get(key)
+        ns = nav_series_map.get(key)
+        if not latest:
+            out[key] = {"r_hold": 0.0, "r_hold_prev": 0.0, "hold_years": 1.0, "cost": cost, "shares": shares, "mv": cost}
+            continue
+        mv = shares * latest
+        r_hold = mv / cost - 1 if cost > 0 else 0.0
+        r_prev = r_hold
+        try:
+            if ns is not None and len(ns) > 2:
+                prev_nav = float(ns["nav"].iloc[-2])
+                r_prev = shares * prev_nav / cost - 1 if cost > 0 else 0.0
+        except Exception:
+            pass
+        today = date.today().isoformat()
+        wsum = 0.0
+        wsh = 0.0
+        for lot in lots:
+            bd = str(lot.get("buy_date", ""))[:10]
+            try:
+                yrs = max(0.0, (date.fromisoformat(today) - date.fromisoformat(bd)).days / 365.0)
+            except Exception:
+                yrs = 0.0
+            wsum += float(lot.get("shares", 0)) * yrs
+            wsh += float(lot.get("shares", 0))
+        hold_years = wsum / wsh if wsh > 0 else 1.0
+        out[key] = {"r_hold": r_hold, "r_hold_prev": r_prev, "hold_years": max(hold_years, 1 / 365.0),
+                    "cost": cost, "shares": shares, "mv": mv}
+    return out
+
+
+def portfolio_diagnostics(cfg, products, ctx):
+    """组合诊断：年化波动率 / 250日最大回撤 / VaR95 / 实际权益暴露度"""
     ret_map = ctx.get("returns")
     if not ret_map:
         return None
@@ -347,7 +622,6 @@ def portfolio_diagnostics(cfg, products, ctx):
     codes = [c for c in weights if c in ret_map]
     if not codes:
         return None
-    # 对齐索引
     common = None
     for c in codes:
         s = ret_map[c]
@@ -360,6 +634,30 @@ def portfolio_diagnostics(cfg, products, ctx):
     if w.sum() <= 0:
         return None
     w = w / w.sum()
+    combo_ret = combo.dot(w)
+    annual_vol = float(combo_ret.std() * math.sqrt(250))
+    nav = (1 + combo_ret).cumprod()
+    max_dd = float((nav / nav.cummax() - 1).min())
+    var95 = float(combo_ret.quantile(0.05))
+    return {"vol": annual_vol, "max_dd": max_dd, "var95": var95}
+
+
+def portfolio_simulator(ret_map, weights_after, total):
+    """调仓后前瞻模拟（现金 0 收益，不参与归一化）。"""
+    if total <= 0:
+        return None
+    import pandas as pd
+    codes = [c for c in weights_after if c in ret_map and weights_after.get(c, 0) > 0]
+    if not codes:
+        return None
+    common = None
+    for c in codes:
+        s = ret_map[c]
+        common = s.index if common is None else common.intersection(s.index)
+    if common is None or len(common) < 30:
+        return None
+    combo = pd.DataFrame({c: ret_map[c].loc[common] for c in codes})
+    w = pd.Series({c: weights_after[c] / total for c in codes})
     combo_ret = combo.dot(w)
     annual_vol = float(combo_ret.std() * math.sqrt(250))
     nav = (1 + combo_ret).cumprod()
