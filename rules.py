@@ -201,7 +201,19 @@ def compute_take_profit(cfg, pctx, ctx):
     else:
         F_hold = 1.0 + per_year * min(hold_years, max_years) * (r_hold + trans) / (2 * trans)
 
-    F_sector = 1.0  # v1：景气数据缺失默认中性（数据就绪后按 HHI 动态加权）
+    F_sector = 1.0
+    try:
+        excess = ctx.get("excess_3m")   # 基金近3月收益 − 基准指数近3月收益（领先指标）
+        hhi = ctx.get("hhi")            # 行业集中度（0~1，前三大行业权重平方和）
+        if excess is not None and excess != excess:  # NaN
+            excess = None
+        if excess is not None:
+            # 持仓越集中（HHI 高）→ 超额收益越由行业景气驱动 → 景气权重越大
+            w_sector = 0.5 + 0.5 * (hhi if hhi is not None and hhi == hhi else 0.5)
+            boom = max(-0.5, min(0.5, excess))        # 超额收益限幅 ±50%
+            F_sector = max(0.9, min(1.15, 1.0 + 0.2 * w_sector * (boom / 0.5)))
+    except Exception:
+        F_sector = 1.0
 
     base = tp.get("base", {})
     T_base = base.get(cls, 0.18 if cls == "equity" else (0.12 if cls == "mixed" else 0.08))

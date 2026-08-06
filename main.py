@@ -159,6 +159,27 @@ class DataFetcher:
         except Exception:
             return 0.0
 
+    def fund_industry_hhi(self, fund_code):
+        """行业集中度 HHI：基金行业配置（证监会大类）前三大权重平方和（归一化）。
+        返回 0~1；数据缺失/异常返回 None。"""
+        try:
+            df = self.ak.fund_portfolio_industry_allocation_em(
+                symbol=fund_code, date=str(datetime.now().year))
+            if df is None or df.empty or "占净值比例" not in df.columns:
+                return None
+            w = df["占净值比例"].astype(float).dropna()
+            w = w[w > 0]
+            if w.empty:
+                return None
+            total = w.sum()
+            if total <= 0:
+                return None
+            w = (w / total).sort_values(ascending=False)
+            top3 = w.head(3)
+            return float((top3 ** 2).sum())
+        except Exception:
+            return None
+
     def gold_daily(self, days=320):
         df = self.ak.spot_hist_sge(symbol="Au99.99")
         df = df[["date", "close"]]
@@ -438,6 +459,7 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map):
 
     # ---- 动态止盈线 V2.2（仅计算展示，触发由规则引擎判定） ----
     nav_series = nav.reset_index(drop=True)
+    hhi = fetch_section(lambda: fetcher.fund_industry_hhi(fcode), f"行业HHI{fcode}")
     if equity_exposure is not None:
         exp_tag = "权益型" if equity_exposure >= 0.8 else ("混合偏债" if equity_exposure >= 0.2 else ("含转债" if equity_exposure >= 0.05 else "纯债"))
         exp_str = f"权益暴露 {equity_exposure*100:.1f}%（{exp_tag}）"
@@ -479,6 +501,8 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map):
         "fees": fees_str or "无",
         "equity_exposure": equity_exposure,
         "bench_pctile": bench_pctile_map.get(code),
+        "r3m": r3m,
+        "hhi": hhi,
         "nav_series": nav_series,
         "action": "hold",
     })
@@ -566,10 +590,14 @@ def main():
                     ctx["csi300_pe_pctile"] = float(r)
                     ctx["csi300_mom20"] = float(m20)
                     ctx["csi300_pe_full"] = pe
+                    ctx.setdefault("bench_ret_63", {})["csi300"] = (
+                        float(last["close"] / df["close"].iloc[-63] - 1) if len(df) > 63 else None)
                 elif name == "中证500":
                     ctx["csi500_pe_pctile"] = float(r)
                     ctx["csi500_mom20"] = float(m20)
                     ctx["csi500_pe_full"] = pe
+                    ctx.setdefault("bench_ret_63", {})["csi500"] = (
+                        float(last["close"] / df["close"].iloc[-63] - 1) if len(df) > 63 else None)
                 pe_tag = "偏高" if r > 0.7 else ("中性" if r >= 0.3 else "低估")
                 L(f"  - PE 分位 {r*100:.0f}%（{pe_tag}），20日动量 {m20:+.1%}")
     us = fetch_section(fetcher.us_index, "标普500")
@@ -869,7 +897,12 @@ def main():
                 "lots": lots_map.get(code, []),
                 "today": today,
                 "fee_rate": 0.005,
+                "hhi": pc.get("hhi"),
             }
+            bench_ret = (ctx.get("bench_ret_63", {}) or {}).get(p.get("bench_index", ""))
+            pc_r3m = pc.get("r3m")
+            if pc_r3m is not None and bench_ret is not None:
+                sig_ctx["excess_3m"] = pc_r3m - bench_ret
             fee_str = pc.get("fees", "")
             m = re.search(r"短期赎回([\d.]+)%", fee_str)
             if m:
