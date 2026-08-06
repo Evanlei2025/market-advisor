@@ -355,8 +355,14 @@ def insert_insights(report, insights, product_names=None, ctx=None):
                 continue
             for a in audit:
                 log_audit(a)
+            try:
+                import state_store
+                n30 = state_store.count_recent_recommendations(name, days=30)
+            except Exception:
+                n30 = 0
+            badge = f"（近一月第 {n30 + 1} 次推荐）" if n30 >= 1 else ""
             rec_lines.append("")
-            rec_lines.append(f"**{name}**")
+            rec_lines.append(f"**{name}**{badge}")
             rec_lines.append(f"> {ai}")
             shown += 1
         if shown == 0:

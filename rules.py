@@ -277,6 +277,10 @@ def _lot_adjusted(cfg, lots, today):
     return saleable, exempt
 
 
+def min_hold_days(cfg):
+    return int(cfg.get("rules", {}).get("take_profit", {}).get("min_hold_days", 7))
+
+
 def take_profit_signal(cfg, pctx, ctx):
     """止盈触发判定（V2.2）：返回 (action, detail, rule_id, trace) 或 (None, ...)（无信号）
     ctx: {"r_hold", "r_hold_prev", "hold_years", "sigma_ann", "bench_pctile",
@@ -426,9 +430,14 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
         if amt <= 0:
             continue
         lots = ctx.get("lots", {}).get(code, [])
-        saleable, _exempt = _lot_adjusted(cfg, lots, today)
+        saleable, exempt = _lot_adjusted(cfg, lots, today)
         if not saleable:
             continue
+        # 逐笔豁免（P1-3）：卖出金额只按可卖笔（持有≥min_hold_days）计算，<7天笔不参与
+        saleable_shares = sum(float(l.get("shares", 0)) for l in saleable)
+        exempt_shares = sum(float(l.get("shares", 0)) for l in exempt)
+        nav_price = float(ctx.get("nav", {}).get(code, 1)) or 1
+        sellable_mv = saleable_shares * nav_price
         if act == "tp_dd":
             frac = 1.0
         elif act == "tp_rest":
@@ -437,12 +446,16 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
             frac = 2.0 / 3.0
         else:
             frac = 1.0 / 3.0
-        sell_amt = round(amt * frac, 2)
+        sell_amt = round(min(amt, sellable_mv * frac), 2)
         if sell_amt < min_amt:
             continue
+        exempt_note = ""
+        if exempt_shares > 0:
+            exempt_note = f"（其中 {exempt_shares:,.2f} 份持有不足 {min_hold_days(cfg)} 天已豁免，未计入卖出）"
         if shadow:
             tp_actions[code] = {"side": "信号", "amount": sell_amt,
-                                "reason": tpc.get("detail", ""), "rule_id": tpc.get("rid"),
+                                "reason": tpc.get("detail", "") + exempt_note,
+                                "rule_id": tpc.get("rid"),
                                 "trace": tpc.get("trace")}
             continue
         spec = settlement_of(cfg, p)
@@ -451,8 +464,8 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
         orders.append({
             "side": "卖出", "code": code, "name": names.get(code, code),
             "amount": sell_amt,
-            "shares": round(sell_amt / max(0.0001, float(ctx.get("nav", {}).get(code, 1))), 2),
-            "reason": tpc.get("detail", ""), "stop": True, "rule_id": tpc.get("rid"),
+            "shares": round(sell_amt / nav_price, 2),
+            "reason": tpc.get("detail", "") + exempt_note, "stop": True, "rule_id": tpc.get("rid"),
             "confirm_date": confirm, "settle_date": settle,
         })
         cash_now += sell_amt

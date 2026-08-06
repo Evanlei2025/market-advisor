@@ -1139,6 +1139,15 @@ def main():
         pnames = {p.get("code", ""): p.get("name", "") for p in products}
         report_full = llm.insert_insights(report_full, insights, pnames, ctx)
         log(f"AI 解读已生成（{usage_info}）")
+        # 推荐日志：当日推荐追加（近一月次数统计的数据源，云端 commit 回写）
+        rec_entries = []
+        for r in insights.get("recommendations") or []:
+            nm = str(r.get("industry") or r.get("product") or "").strip()
+            rsn = str(r.get("reason") or "").strip()
+            if nm and rsn:
+                rec_entries.append({"name": nm, "type": "industry" if r.get("industry") else "product",
+                                    "reason": rsn})
+        state_store.kb_append_recommendations(rec_entries)
         adv = insights.get("equity_target_advice") or {}
         raw = adv.get("value")
         if raw is not None:

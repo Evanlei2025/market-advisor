@@ -152,6 +152,57 @@ def record_trace(entry):
         log_state(f"[WARN] 留痕失败: {e}")
 
 
+# ---------------- 推荐日志（近一月推荐次数：用户"次数暗示"需求） ----------------
+REC_PATH = os.path.join(KB_DIR, "recommendations.json")
+
+
+def kb_read_recommendations():
+    """读取推荐日志 [{date, name, type, reason}]；缺失返回 []"""
+    try:
+        if os.path.exists(REC_PATH):
+            with open(REC_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def kb_append_recommendations(entries):
+    """追加当日推荐（自动加 date），写回 recommendations.json。
+    云端每次运行后由 Actions commit 回写，实现跨日持久。"""
+    if not entries:
+        return
+    try:
+        os.makedirs(KB_DIR, exist_ok=True)
+        data = kb_read_recommendations()
+        today = date.today().isoformat()
+        for e in entries:
+            name = str(e.get("name") or e.get("industry") or "").strip()
+            if not name:
+                continue
+            data.append({"date": today, "name": name,
+                         "type": str(e.get("type", "") or "").strip(),
+                         "reason": str(e.get("reason", ""))[:120]})
+        with open(REC_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        log_state(f"[REC] 推荐日志追加 {len(entries)} 条")
+    except Exception as e:
+        log_state(f"[WARN] 推荐日志写入失败: {e}")
+
+
+def count_recent_recommendations(name, days=30):
+    """近 days 天内某名称被推荐次数"""
+    if not name:
+        return 0
+    cutoff = (date.today() - __import__("datetime").timedelta(days=days)).isoformat()
+    n = 0
+    for r in kb_read_recommendations():
+        if str(r.get("name", "")).strip() == name and str(r.get("date", ""))[:10] >= cutoff:
+            n += 1
+    return n
+
+
 # ---------------- 知识库读取 ----------------
 def kb_product(code):
     """读取 knowledge_base/products/<code>.md 摘要（前 N 行概述 + 近况节）。
