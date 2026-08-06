@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """确定性策略引擎：今日跟投指令的生成者。
 输入必须是数据，输出必须是确定的仓位操作。AI 无权修改本模块的输出。
-V2.2：市值口径算账、动态止盈（上限门+峰值回撤保护+短仓地板+费后口径）、
-买入冻结（原风暴锁，仅保留最保守仓位档）、关注池买入（含零持仓）、冷却期。
+V2.3：市值口径算账、动态止盈（上限门+峰值回撤保护+短仓地板+费后口径+单向穿越取最高档）、
+买入冻结（市场预警，仅最保守仓位档）、关注池买入（含零持仓）、冷却期、在途资金。
 """
 import math
 
@@ -125,11 +125,13 @@ def _equity_class(exposure):
 
 
 def _sigma_ref(cfg, exposure):
-    """σ_ref 按权益暴露度线性插值（0.02 ↔ 0.08 ↔ 0.20），消除档位跳变"""
+    """σ_ref 按权益暴露度线性插值（0.02 ↔ 0.08 ↔ 0.20），消除档位跳变。
+    数据缺失/NaN → 权益中心 0.20（保守：波动中心越高 → 目标线越低）"""
+    if exposure is None or exposure != exposure:
+        return cfg.get("rules", {}).get("take_profit", {}).get("vol_ref", {}).get("equity", 0.20)
+    exposure = max(0.0, min(1.0, exposure))
     vr = cfg.get("rules", {}).get("take_profit", {}).get("vol_ref", {})
     v_eq, v_mix, v_bd = vr.get("equity", 0.20), vr.get("mixed", 0.08), vr.get("bond", 0.02)
-    if exposure is None:
-        return v_eq
     if exposure >= 0.8:
         return v_eq
     if exposure <= 0.2:
@@ -180,16 +182,22 @@ def compute_take_profit(cfg, pctx, ctx):
         return None
 
     exposure = ctx.get("exposure")
+    if exposure is None or exposure != exposure:  # NaN 防护
+        exposure = None
     cls = _equity_class(exposure)
     sigma = ctx.get("sigma_ann") or ewma_vol(nav_series)
-    if sigma is None:
+    if sigma is None or sigma != sigma:
         sigma = 0.20 if cls == "equity" else (0.08 if cls == "mixed" else 0.02)
 
     vref = _sigma_ref(cfg, exposure)
     F_vol = max(0.75, min(1.35, sigma / vref))
 
     hold_years = ctx.get("hold_years", 1.0)
+    if hold_years is None or hold_years != hold_years or hold_years <= 0:
+        hold_years = 1.0
     r_hold = ctx.get("r_hold", 0.0)
+    if r_hold is None or r_hold != r_hold:
+        r_hold = 0.0
     ht = tp.get("hold_factor", {})
     per_year = ht.get("per_year", 0.15)
     max_years = ht.get("max_years", 3.0)
@@ -225,9 +233,11 @@ def compute_take_profit(cfg, pctx, ctx):
     # 上限门（一票否决）：v_bench ≥ 70% 起线性压缩；纯债（exposure→0）豁免
     cap = tp.get("cap", {})
     v_bench = ctx.get("bench_pctile")
+    if v_bench is not None and v_bench != v_bench:  # NaN 防护
+        v_bench = None
     T_cap = clamp_hi
     if v_bench is not None:
-        w_bench = max(0.0, min(1.0, exposure or 0.0))
+        w_bench = max(0.0, min(1.0, exposure if exposure is not None else 0.0))
         start = cap.get("start_pctile", 0.7)
         max_reduce = cap.get("max_reduce", 0.27)
         if v_bench > start:
@@ -293,13 +303,22 @@ def take_profit_signal(cfg, pctx, ctx):
         return None, "", None, None
 
     r_hold = ctx.get("r_hold", 0.0)
-    r_prev = ctx.get("r_hold_prev", r_hold)
+    if r_hold is None or r_hold != r_hold:
+        r_hold = 0.0
+    # 昨日收益缺失视为远低于任何档位（首日建仓即达标也可触发）
+    r_prev = ctx.get("r_hold_prev")
+    if r_prev is None or r_prev != r_prev:
+        r_prev = -1.0
     hold_years = ctx.get("hold_years", 1.0)
-    if hold_years <= 0:
+    if hold_years is None or hold_years != hold_years or hold_years <= 0:
         hold_years = 1.0
     fee = ctx.get("fee_rate", 0.005)
+    if fee is None or fee != fee:
+        fee = 0.005
     margin = tp.get("fee_margin", 0.01)
     gap = tp.get("tier_gap", [0.05, 0.10])
+    if not isinstance(gap, list) or len(gap) < 2:
+        gap = [0.05, 0.10]
 
     # 门槛：≤1 年按持有年数折算（带 6% 地板）；>1 年按年化
     if hold_years <= 1.0:
@@ -309,8 +328,10 @@ def take_profit_signal(cfg, pctx, ctx):
     else:
         def level_for(tev):
             return max(tev, 0.06)
-        r_now = (1 + r_hold) ** (1.0 / hold_years) - 1
-        r_yest = (1 + r_prev) ** (1.0 / hold_years) - 1 if r_prev > -1 else r_now
+        base_now = max(r_hold, -0.99)   # 年化保护：r_hold ≤ −1 时负底数分数幂崩溃
+        r_now = (1 + base_now) ** (1.0 / hold_years) - 1
+        base_prev = max(r_prev, -0.99)
+        r_yest = (1 + base_prev) ** (1.0 / hold_years) - 1
 
     lv1 = level_for(st["T_eff"]) + fee + margin
     lv2 = level_for(st["T_eff"] + gap[0]) + fee + margin
@@ -321,9 +342,10 @@ def take_profit_signal(cfg, pctx, ctx):
     dd_hit = (peak_r is not None and st["r_hold"] > 0
               and peak_r >= st["T_eff"] and st["dd_ret"] >= st["dd_thr"])
 
-    # 单向穿越检测（基于今日 vs 昨日）
+    # 单向穿越检测（基于今日 vs 昨日；等值也视为穿越，消除漏检）
+    # 三档各自独立穿越判定，取穿越的最高档 → 跳档自然取最高档，且无持续性重复触发
     def crossed(level):
-        return r_yest < level and r_now >= level
+        return r_yest <= level and r_now >= level
 
     action = None
     detail = ""
@@ -332,20 +354,25 @@ def take_profit_signal(cfg, pctx, ctx):
         action, rid = "tp_dd", "TP-DD"
         detail = (f"回撤保护：持有收益 {r_hold*100:.1f}%（峰值 {peak_r*100:.1f}% ≥ 目标线 {st['T_eff']*100:.1f}%），"
                   f"自高点回撤 {st['dd_ret']*100:.1f}% ≥ {st['dd_thr']*100:.1f}% → 建议清仓")
-    elif crossed(lv3) or (r_now >= lv3 and r_yest >= lv2):
-        action, rid = "tp_rest", "TP-YIELD-3"
-        detail = f"末档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv3*100:.1f}%（目标线 {st['T_eff']*100:.1f}%+{gap[1]*100:.0f}%）→ 建议卖出剩余"
-    elif crossed(lv2) or (r_now >= lv2 and r_yest >= lv1):
-        action, rid = "tp_2of3", "TP-YIELD-2"
-        detail = f"次档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv2*100:.1f}%（目标线 {st['T_eff']*100:.1f}%+{gap[0]*100:.0f}%）→ 建议再卖 1/3"
-    elif crossed(lv1):
-        action, rid = "tp_1of3", "TP-YIELD-1"
-        detail = f"首档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv1*100:.1f}%（目标线 {st['T_eff']*100:.1f}%，含费后安全边际）→ 建议卖出 1/3"
+    else:
+        hit = []
+        if crossed(lv1):
+            hit.append(("tp_1of3", "TP-YIELD-1",
+                        f"首档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv1*100:.1f}%（目标线 {st['T_eff']*100:.1f}%，含费后安全边际）→ 建议卖出 1/3"))
+        if crossed(lv2):
+            hit.append(("tp_2of3", "TP-YIELD-2",
+                        f"次档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv2*100:.1f}%（目标线 {st['T_eff']*100:.1f}%+{gap[0]*100:.0f}%）→ 建议再卖 1/3"))
+        if crossed(lv3):
+            hit.append(("tp_rest", "TP-YIELD-3",
+                        f"末档止盈：持有收益达 {r_now*100:.1f}% ≥ {lv3*100:.1f}%（目标线 {st['T_eff']*100:.1f}%+{gap[1]*100:.0f}%）→ 建议卖出剩余"))
+        if hit:
+            action, rid, detail = hit[-1]
 
     trace = None
     if action:
         trace = {
             "T_eff": round(st["T_eff"], 4), "T_pre": round(st["T_pre"], 4),
+            "T_cap": round(st["T_cap"], 4),
             "v_bench": ctx.get("bench_pctile"), "factors": {k: round(st[k], 4)
                                                             for k in ("F_vol", "F_hold", "F_sector")},
             "signal_date": str(ctx.get("today", "")), "execute_date": "",
@@ -424,8 +451,8 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
         code = p.get("code", "")
         tpc = (tp_ctx_map or {}).get(code) or {}
         act = tpc.get("action")
-        if not act:
-            continue
+        if not act or tpc.get("repeat"):
+            continue  # 同档位近5交易日已触发（去重），不重复生成指令/展示
         amt = remaining.get(code, 0)
         if amt <= 0:
             continue
@@ -510,7 +537,7 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
             if not cands:
                 cands = [p for p in products if p.get("type") == "bond"]
             if cands:
-                cands.sort(key=lambda p: ctx.get("exposure", {}).get(p.get("fund_code", p.get("code", "")), 1.0))
+                cands.sort(key=lambda p: ctx.get("exposure", {}).get(p.get("code", ""), 1.0))
                 code = cands[0]["code"]
                 avail = max(0.0, cash_now - cash_target_amt)
                 amt = round(min(bd_gap, avail), 2)

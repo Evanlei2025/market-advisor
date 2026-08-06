@@ -879,7 +879,11 @@ def main():
                                                "shares": h.get("shares", 0), "cost": h.get("cost", 0)}]
 
         # ---- 动态止盈 V2.2：信号判定（影子模式只记录） ----
+        # 近5交易日同档位去重（V型回落后二次穿越的防护；trace 仍全量记录供评估）
+        _last_tp = state_store.recent_tp_actions()
+
         tp_ctx_map = {}
+        repeat_signals = {}
         product_sells = []
         for p in products:
             code = p.get("code", "")
@@ -909,7 +913,11 @@ def main():
                 sig_ctx["fee_rate"] = float(m.group(1)) / 100.0
             act, detail, rid, trace = rules.take_profit_signal(cfg, pc, sig_ctx)
             if act:
-                tp_ctx_map[code] = {"action": act, "detail": detail, "rid": rid, "trace": trace}
+                is_repeat = (_last_tp.get(code) == act)
+                if is_repeat:
+                    repeat_signals[code] = {"name": pc.get("name", code), "action": act}
+                tp_ctx_map[code] = {"action": act, "detail": detail, "rid": rid,
+                                    "trace": trace, "repeat": is_repeat}
                 state_store.record_trace(trace) if trace else None
 
         # ---- 订单簿（市值口径 + 关注池 + 余额约束 + 冷却/在途） ----
@@ -955,6 +963,10 @@ def main():
                 L(f"- {code}：建议落袋约 {a['amount']:,.0f} 元")
                 L(f"  原因：{a['reason']}")
             L("*止盈目标线算法处于 6 个月观察期，信号仅供跟踪与评估，暂不生成执行指令。*")
+        if repeat_signals:
+            L("")
+            L(f"- 信号延续提示：{'、'.join(v['name'] for v in repeat_signals.values())} 的止盈信号与近 5 个交易日已提示的一致，"
+              f"今日不重复展示（信号仍在持续记录）")
 
         if orders:
             holdings_buy = {h.get("fund_code") or h.get("code"): h.get("buy_date", "")

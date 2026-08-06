@@ -95,15 +95,18 @@ def settled_cash(cfg):
 
 # ---------------- 冷却期 ----------------
 def trading_days_between(d1, d2):
-    """两日期之间的交易日数（akshare 交易日历，失败回退自然日/1.4 近似）"""
+    """两日期之间的交易日数（含区间内全部交易日；akshare 日历，失败回退自然日/1.4 近似）"""
     try:
         import akshare as ak
         df = ak.tool_trade_date_hist_sina()
         cal = set(df["trade_date"].astype(str))
-        return sum(1 for d in (d1, d2) if d in cal)
+        s1, s2 = d1.isoformat(), d2.isoformat()
+        if s1 > s2:
+            s1, s2 = s2, s1
+        return sum(1 for d in cal if s1 <= d <= s2)
     except Exception:
         try:
-            return max(1, int((d2 - d1).days / 1.4))
+            return max(1, int(abs((d2 - d1).days) / 1.4))
         except Exception:
             return 1
 
@@ -134,18 +137,52 @@ def in_cooldown(cfg, state=None):
 
 
 # ---------------- 留痕表（止盈信号/算法偏差） ----------------
+TRACES_PATH = os.path.join(KB_DIR, "traces.json")
+
+
+def kb_read_traces():
+    """读取留痕表（升序 list）；缺失返回 []"""
+    try:
+        if os.path.exists(TRACES_PATH):
+            with open(TRACES_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def recent_tp_actions(traces=None, days=5):
+    """最近 days 交易日内每产品最近一次止盈 action（排除今天）。
+    返回 {code: action}；用于同档位信号去重（V型回落二次穿越防护）。"""
+    traces = traces if traces is not None else kb_read_traces()
+    out = {}
+    today = date.today()
+    for t in reversed(traces):
+        code = str(t.get("code", ""))
+        act = str(t.get("action", ""))
+        sd = str(t.get("signal_date", ""))[:10]
+        if not code or not act or not sd:
+            continue
+        try:
+            d = date.fromisoformat(sd)
+        except Exception:
+            continue
+        if d >= today:
+            continue
+        if code not in out and trading_days_between(d, today) <= days:
+            out[code] = act
+    return out
+
+
 def record_trace(entry):
     """留痕七字段：{T_eff, T_pre, v_bench, 因子值, 信号日, 执行日, 费后净收益}
-    写入 knowledge_base/traces.json（追加）。云端只读调用方负责传参。"""
+    写入 knowledge_base/traces.json（追加）。"""
     try:
         os.makedirs(KB_DIR, exist_ok=True)
-        path = os.path.join(KB_DIR, "traces.json")
-        data = []
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+        data = kb_read_traces()
         data.append(entry)
-        with open(path, "w", encoding="utf-8") as f:
+        with open(TRACES_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         log_state(f"[TRACE] 已记录: {entry.get('code','?')} T_eff={entry.get('T_eff')}")
     except Exception as e:

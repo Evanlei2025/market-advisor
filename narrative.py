@@ -116,11 +116,19 @@ class CRO:
                     f"当前为影子模式（观察期 6 个月），信号仅记录、不生成执行指令，"
                     f"期满评估后转正式。")
         if s == "REGULAR":
-            if any(o.get("side") == "买入" and o.get("rule_id") == "REB-BOND" for o in self.i.orders):
+            bond_buys = [o for o in self.i.orders
+                         if o.get("side") == "买入" and o.get("code") in self.i.bond_codes]
+            if bond_buys:
                 return ("组合的稳健部分低于目标比例，今日按纪律买入稳健产品补足仓位。"
                         "此决策由组合风险管理驱动，是当前约束下的最优安排。")
             if any(o.get("side") == "买入" for o in self.i.orders):
                 return "今日按纪律增配，恢复组合目标比例。此决策由规则引擎驱动，不改动、不商量。"
+            return "今日止盈/减配信号触发，按纪律落袋。已赚到的部分锁定为现金，等待下一个信号。"
+        if s == "IDLE":
+            if self.i.cooldown_active:
+                return ("今日处于操作冷却期，维持当前持仓。"
+                        "冷却期是为了避免频繁交易带来的手续费损耗，请耐心等待。")
+            return "今日无规则触发，维持当前持仓。不操作就是最好的操作，耐心等待值得出手的信号。"
         return None
 
     def get_storm_status_line(self):
