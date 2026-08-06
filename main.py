@@ -38,6 +38,14 @@ PE_HIST_YEARS = 10
 FETCH_RETRY = 3
 FETCH_RETRY_WAIT = 2.0
 PUSH_RETRY = 3
+FRESH_TOLERANCE_DAYS = 3  # 数据最后日期距今天超过该自然日数 → 判定滞后
+
+# 数据源运行状态（报告「系统运行状态」板块数据）
+FETCH_STATUS = {}
+
+
+def _mark_fetch(name, ok, detail=""):
+    FETCH_STATUS[name] = "ok" if ok else detail or f"fail:{name}"
 
 
 def log(msg):
@@ -64,8 +72,19 @@ def load_config():
             "holdings": [], "products": []}
 
 
+def _pick_cols(df, *candidates):
+    """列名防御：返回第一个存在于 df.columns 的候选列名，全部缺失返回 None（1.6 类型安全）"""
+    if df is None:
+        return None
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
 class DataFetcher:
-    """行情用腾讯源(稳定)，估值用乐咕，债券/黄金用官方源，宏观扩展指标失败不阻塞"""
+    """行情用腾讯源(稳定)，估值用乐咕，债券/黄金用官方源，宏观扩展指标失败不阻塞。
+    备选链：主源失败 → 备选源 → 返回 None（调用方降级，2.1）"""
 
     def __init__(self):
         import akshare as ak
@@ -74,19 +93,34 @@ class DataFetcher:
         self.session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
 
     def index_daily(self, tx_symbol, days=320):
-        r = self.session.get(
-            "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-            params={"param": f"{tx_symbol},day,,,{days},qfq"}, timeout=20)
-        j = r.json()
-        d = j["data"][tx_symbol]
-        key = "qfqday" if "qfqday" in d else "day"
-        rows = d[key]
-        df = pd.DataFrame(rows).iloc[:, :6]
-        df.columns = ["date", "open", "close", "high", "low", "volume"]
-        for c in df.columns[1:]:
-            df[c] = pd.to_numeric(df[c])
-        df["pct"] = df["close"].pct_change() * 100
-        return df.reset_index(drop=True)
+        try:
+            r = self.session.get(
+                "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+                params={"param": f"{tx_symbol},day,,,{days},qfq"}, timeout=20)
+            j = r.json()
+            d = j["data"][tx_symbol]
+            key = "qfqday" if "qfqday" in d else "day"
+            rows = d[key]
+            df = pd.DataFrame(rows).iloc[:, :6]
+            df.columns = ["date", "open", "close", "high", "low", "volume"]
+            for c in df.columns[1:]:
+                df[c] = pd.to_numeric(df[c])
+            df["pct"] = df["close"].pct_change() * 100
+            return df.reset_index(drop=True)
+        except Exception:
+            # 备选源：akshare 指数日线（2.1）
+            try:
+                raw = self.ak.stock_zh_index_daily(symbol=tx_symbol)
+                if raw is None or raw.empty:
+                    return None
+                df = raw.tail(days).reset_index(drop=True)
+                df = df[["date", "open", "close", "high", "low", "volume"]].copy()
+                for c in df.columns[1:]:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                df["pct"] = df["close"].pct_change() * 100
+                return df
+            except Exception:
+                return None
 
     def realtime_quotes(self, tx_codes):
         url = "https://qt.gtimg.cn/q=" + ",".join(tx_codes)
@@ -102,23 +136,50 @@ class DataFetcher:
         return out
 
     def pe_history(self, symbol):
-        df = self.ak.stock_index_pe_lg(symbol=symbol)
-        df = df[["日期", "滚动市盈率"]]
+        df = self._pe_lg(symbol)
+        if df is None or df.empty:
+            return df
+        c_date = _pick_cols(df, "日期", "trade_date")
+        c_pe = _pick_cols(df, "滚动市盈率", "市盈率", "pe")
+        if c_date is None or c_pe is None:
+            return None
+        df = df[[c_date, c_pe]].copy()
         df.columns = ["date", "pe"]
         df["date"] = pd.to_datetime(df["date"])
         cutoff = pd.Timestamp(f"{datetime.now().year - PE_HIST_YEARS}-01-01")
         return df[df["date"] >= cutoff].dropna()
 
     def pe_history_full(self, symbol):
-        df = self.ak.stock_index_pe_lg(symbol=symbol)
-        df = df[["日期", "滚动市盈率"]]
+        df = self._pe_lg(symbol)
+        if df is None or df.empty:
+            return df
+        c_date = _pick_cols(df, "日期", "trade_date")
+        c_pe = _pick_cols(df, "滚动市盈率", "市盈率", "pe")
+        if c_date is None or c_pe is None:
+            return None
+        df = df[[c_date, c_pe]].copy()
         df.columns = ["date", "pe"]
         df["date"] = pd.to_datetime(df["date"])
         return df.dropna()
 
+    def _pe_lg(self, symbol):
+        """乐咕PE（支持：上证50/沪深300/上证380/创业板50/中证500/上证180/深证红利/深证100/中证1000/上证红利/中证100/中证800）"""
+        try:
+            df = self.ak.stock_index_pe_lg(symbol=symbol)
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            pass
+        return None
+
     def bond_rates(self):
         df = self.ak.bond_zh_us_rate()
-        df = df[["日期", "中国国债收益率2年", "中国国债收益率10年"]].dropna()
+        c_date = _pick_cols(df, "日期")
+        c_y2 = _pick_cols(df, "中国国债收益率2年")
+        c_y10 = _pick_cols(df, "中国国债收益率10年")
+        if c_date is None or c_y2 is None or c_y10 is None:
+            return None
+        df = df[[c_date, c_y2, c_y10]].dropna()
         df.columns = ["date", "y2", "y10"]
         df["date"] = pd.to_datetime(df["date"])
         cutoff = pd.Timestamp(f"{datetime.now().year - PE_HIST_YEARS}-01-01")
@@ -181,9 +242,23 @@ class DataFetcher:
             return None
 
     def gold_daily(self, days=320):
-        df = self.ak.spot_hist_sge(symbol="Au99.99")
-        df = df[["date", "close"]]
-        return df.tail(days).reset_index(drop=True)
+        try:
+            df = self.ak.spot_hist_sge(symbol="Au99.99")
+            df = df[["date", "close"]]
+            return df.tail(days).reset_index(drop=True)
+        except Exception:
+            # 备选源：沪金主力连续（2.1）
+            try:
+                df = self.ak.futures_main_sina(symbol="AU0")
+                if df is None or len(df) < 2:
+                    return None
+                df = df[["日期", "收盘价"]].copy()
+                df.columns = ["date", "close"]
+                df["close"] = pd.to_numeric(df["close"], errors="coerce")
+                df = df.dropna()
+                return df.tail(days).reset_index(drop=True)
+            except Exception:
+                return None
 
     def cls_news(self):
         df = self.ak.stock_info_global_cls()
@@ -205,9 +280,16 @@ class DataFetcher:
 
     def fund_nav_history(self, fund_code):
         df = self.ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
-        df = df[["净值日期", "单位净值", "日增长率"]]
-        df.columns = ["date", "nav", "growth"]
-        return df.dropna().reset_index(drop=True)
+        c_date = _pick_cols(df, "净值日期")
+        c_nav = _pick_cols(df, "单位净值")
+        c_growth = _pick_cols(df, "日增长率")
+        if c_date is None or c_nav is None:
+            return None
+        df = df[[c_date, c_nav, c_growth]].dropna().copy() if c_growth else df[[c_date, c_nav]].dropna().copy()
+        df.columns = ["date", "nav"] + (["growth"] if c_growth else ["growth"])
+        if c_growth is None:
+            df["growth"] = float("nan")
+        return df.reset_index(drop=True)
 
     def fund_profile(self, fund_code):
         df = self.ak.fund_individual_basic_info_xq(symbol=fund_code)
@@ -325,8 +407,11 @@ def sma(series, n):
 def fetch_section(fn, name):
     for attempt in range(1, FETCH_RETRY + 1):
         try:
-            return fn()
+            r = fn()
+            _mark_fetch(name, True)
+            return r
         except Exception as e:
+            _mark_fetch(name, False, f"{type(e).__name__}")
             if attempt < FETCH_RETRY:
                 log(f"[WARN] {name} 第{attempt}次失败({type(e).__name__})，重试中...")
                 time.sleep(FETCH_RETRY_WAIT)
@@ -346,8 +431,11 @@ def safe_format(v, fmt="{:+.2f}", suffix="%"):
 
 def fetch_once(fn, name):
     try:
-        return fn()
+        r = fn()
+        _mark_fetch(name, True)
+        return r
     except Exception as e:
+        _mark_fetch(name, False, f"{type(e).__name__}")
         log(f"[WARN] {name} 失败({type(e).__name__})，切换备选源")
         return None
 
@@ -357,6 +445,15 @@ def pd_isna(v):
         return v != v
     except Exception:
         return False
+
+
+def is_stale_date(date_str, tolerance_days=FRESH_TOLERANCE_DAYS):
+    """数据新鲜度校验（1.4）：最后日期距今天超过容差自然日 → 滞后。异常输入不误报"""
+    try:
+        d = date.fromisoformat(str(date_str)[:10])
+    except Exception:
+        return False
+    return (date.today() - d).days > tolerance_days
 
 
 TYPE_LABELS = {"bond": "债券型", "money": "现金管理", "equity": "权益型", "gold": "黄金型", "other": "理财"}
@@ -401,7 +498,11 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map):
     r1w, r1m, r3m, r6m, r1y = rb(5), rb(21), rb(63), rb(126), rb(250)
     max_dd = float((n / n.cummax() - 1).min())
     latest = nav.iloc[-1]
-    nav_str = f"{float(latest['nav']):.4f}（{safe_format(float(latest['growth']) if not pd_isna(latest['growth']) else None, '{:+.2f}')}，净值日期 {str(latest['date'])[:10]}）"
+    nav_date = str(latest['date'])[:10]
+    stale = is_stale_date(nav_date)
+    nav_str = f"{float(latest['nav']):.4f}（{safe_format(float(latest['growth']) if not pd_isna(latest['growth']) else None, '{:+.2f}')}，净值日期 {nav_date}）"
+    if stale:
+        nav_str += " ⚠️数据滞后"
 
     fees = fetch_section(lambda: fetcher.fund_fees(fcode), f"费率{fcode}") or []
     prof_map = {str(k).strip(): str(v).strip() for k, v in profile.items()}
@@ -496,6 +597,7 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map):
         "nav_latest": nav_str,
         "returns": f"近1周{pct(r1w)} 近1月{pct(r1m)} 近3月{pct(r3m)} 近6月{pct(r6m)} 近1年{pct(r1y)}",
         "max_dd": f"{max_dd*100:.1f}%",
+        "nav_stale": stale,
         "ranking": ranking or "无",
         "scale": scale, "inception": inception, "manager": manager,
         "fees": fees_str or "无",
@@ -526,26 +628,130 @@ def split_blocks(report):
 
 
 def build_compact(blocks, page_url, date_str):
-    """精简版：客户必看板块（其余细节见网页）"""
+    """精简版：客户必看板块（其余细节见网页）。
+    推送字节上限保护（1.3）：超过 3700 字节时按优先级保留核心板块，其余从尾部裁剪。"""
     want = ["今日一句话", "今日指令摘要", "指标温度表", "理财产品跟踪",
             "今日跟投指令", "行业与产品关注", "风险观察", "术语速查"]
-    out = [f"# 每日投顾报告（精简版）{date_str}", ""]
-    for w in want:
-        if w in blocks and blocks[w].strip():
-            out.append(f"## {w}")
-            out.append(blocks[w].strip())
-            out.append("")
-    out.append("---")
-    out.append("")
-    out.append(f"📄 完整版报告（含全部数据明细）: {page_url}")
-    out.append("*本报告由本地程序按固定规则自动生成，仅供参考，不构成投资建议。*")
-    return "\n".join(out)
+    CORE = ["今日一句话", "今日指令摘要", "今日跟投指令"]
+    MAX_BYTES = 3700
+
+    def assemble(selected):
+        o = [f"# 每日投顾报告（精简版）{date_str}", ""]
+        for w in selected:
+            if w in blocks and blocks[w].strip():
+                o.append(f"## {w}")
+                o.append(blocks[w].strip())
+                o.append("")
+        o.append("---")
+        o.append("")
+        o.append(f"📄 完整版报告（含全部数据明细）: {page_url}")
+        o.append("*本报告由本地程序按固定规则自动生成，仅供参考，不构成投资建议。*")
+        return "\n".join(o)
+
+    selected = [w for w in want if w in blocks and blocks[w].strip()]
+    compact = assemble(selected)
+    drop_order = [w for w in reversed(selected) if w not in CORE]
+    while len(compact.encode("utf-8")) > MAX_BYTES and drop_order:
+        drop = drop_order.pop(0)
+        selected = [w for w in selected if w != drop]
+        compact = assemble(selected)
+    if len(compact.encode("utf-8")) > MAX_BYTES:
+        compact += "\n\n⚠️ 推送内容超长，已自动裁剪，完整报告请查看 GitHub Pages"
+    return compact
+
+
+_ARGS = None
+
+
+def build_chart_data(ctx, mv_map, returns_map, weights_map, bench_ret_series, total_mv, bench_weights=None):
+    """6.1 HTML 图表数据：估值条形图 / 仓位饼图 / 组合净值 vs 基准（数据不足返回空 dict）"""
+    out = {}
+    pe = {}
+    for key, label in (("csi300_pe_pctile", "沪深300"),
+                       ("csi500_pe_pctile", "中证500"),
+                       ("csi_cyb_pe_pctile", "创业板50")):
+        v = ctx.get(key)
+        if v is not None:
+            pe[label] = round(v * 100, 1)
+    if pe:
+        out["valuation"] = {"labels": list(pe), "values": list(pe.values())}
+    if mv_map:
+        alloc = {}
+        for code, mv in mv_map.items():
+            if mv is None:
+                continue
+            if code == "cash":
+                alloc["现金"] = round(float(mv), 0)
+            else:
+                alloc[str(code)] = round(float(mv), 0)
+        if alloc and total_mv > 0:
+            out["allocation"] = {"labels": list(alloc), "values": list(alloc.values())}
+    if returns_map and weights_map and total_mv > 0:
+        frames = []
+        for code, r in returns_map.items():
+            if code in weights_map and weights_map.get(code):
+                frames.append(pd.Series(r) * float(weights_map[code]))
+        if frames:
+            port = pd.concat(frames, axis=1).ffill().fillna(0.0).sum(axis=1)
+            port = port[port.abs() < 0.5]
+            if len(port) > 30:
+                cum = (1.0 + port).cumprod() * 100.0
+                nav = {"labels": [str(d)[:10] for d in cum.index],
+                       "values": [round(v, 1) for v in cum.values]}
+                if bench_ret_series:
+                    bb = None
+                    for bname, s in bench_ret_series.items():
+                        w = bench_weights.get(bname) if bench_weights else None
+                        if not w:
+                            continue
+                        part = pd.Series(s).reindex(port.index).ffill().fillna(0.0) * float(w)
+                        bb = part if bb is None else bb + part
+                    if bb is not None:
+                        nav["bench"] = [round(v, 1) for v in ((1.0 + bb).cumprod() * 100.0).values]
+                out["nav"] = nav
+    return out
 
 
 def main():
+    """顶层兜底（2.3）：任何未捕获异常 → 输出降级报告并尝试推送，绝不静默崩溃"""
+    try:
+        _main()
+    except Exception as e:
+        log(f"[ERROR] 主流程异常: {type(e).__name__}: {str(e)[:200]}")
+        log(f"[ERROR] {traceback.format_exc()}")
+        try:
+            cfg = load_config()
+            today = date.today().isoformat()
+            degraded = (f"# 每日投顾报告 {today}（降级版）\n\n"
+                        f"## 今日一句话\n> 今日系统数据处理出现异常，请以 App 持仓与行情为准，暂不执行任何操作。\n\n"
+                        f"## 今日跟投指令\n- 异常日纪律：维持当前持仓，不做任何买卖；明日报告恢复后再评估。\n\n"
+                        f"## 执行回执\n- 执行后请告知：已执行 / 部分 / 未执行（用于记录下次冷却期与在途资金）\n\n"
+                        f"---\n*本报告由本地程序按固定规则自动生成，仅供参考，不构成投资建议。*")
+            os.makedirs(REPORT_DIR, exist_ok=True)
+            md_path = os.path.join(REPORT_DIR, f"report_{today}.md")
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(degraded)
+            log(f"[WARN] 已输出降级报告: {md_path}")
+            if _ARGS is None or not _ARGS.push_off:
+                channel = cfg.get("push", {}).get("channel", "none")
+                if channel == "wecom" and cfg.get("push", {}).get("wecom_webhook"):
+                    push_wecom(cfg["push"]["wecom_webhook"], f"投顾报告异常 {today}", degraded)
+                elif channel == "serverchan" and cfg.get("push", {}).get("serverchan_key"):
+                    push_serverchan(cfg["push"]["serverchan_key"], f"投顾报告异常 {today}", degraded)
+        except Exception as e2:
+            log(f"[ERROR] 降级报告也失败: {type(e2).__name__}: {str(e2)[:100]}")
+
+
+def args_parse():
     ap = argparse.ArgumentParser()
     ap.add_argument("--push-off", action="store_true", help="不推送，仅生成报告")
-    args = ap.parse_args()
+    return ap
+
+
+def _main():
+    global _ARGS
+    _ARGS = args_parse().parse_args()
+    args = _ARGS
 
     cfg = load_config()
 
@@ -558,15 +764,20 @@ def main():
     lines = []
     L = lines.append
     ctx = {"news": []}
+    bench_weights = None
 
     # ---------- 1. 指数速览（完整版明细 + 策略输入） ----------
     indexes = [
         ("沪深300", "sh000300"), ("中证500", "sh000905"),
         ("中证红利", "sh000922"), ("创业板指", "sz399006"),
     ]
-    pe_indexes = ["沪深300", "中证500", "上证红利"]
+    pe_indexes = ["沪深300", "中证500", "上证红利", "创业板指"]
+    PE_SYMBOL = {"沪深300": "沪深300", "中证500": "中证500", "上证红利": "上证红利", "创业板指": "创业板50"}
     L(f"## 市场速览")
     idx_ctx = {}
+    index_5d_trend = {}
+    bench_ret_series = {}
+    stale_indexes = []
     for name, tx in indexes:
         df = fetch_section(lambda t=tx: fetcher.index_daily(t), name)
         if df is None or df.empty:
@@ -576,11 +787,22 @@ def main():
         close = last["close"]
         pct = last["pct"] if last["pct"] == last["pct"] else 0.0
         emoji = "🔴" if pct >= 0 else "🟢"
-        L(f"- {name}: {close:.2f} {emoji}{pct:+.2f}%")
+        idx_date = str(last["date"])[:10]
+        if is_stale_date(idx_date, tolerance_days=2):
+            stale_indexes.append(name)
+            L(f"- {name}: {close:.2f} {emoji}{pct:+.2f}%（数据截至 {idx_date} ⚠️）")
+        else:
+            L(f"- {name}: {close:.2f} {emoji}{pct:+.2f}%")
         idx_ctx[name] = f"{close:.2f}（{pct:+.2f}%）"
+        if len(df) > 6:
+            d5 = float(close) / float(df["close"].iloc[-6]) - 1
+            index_5d_trend[name] = f"{d5*100:+.1f}%"
+            if name == "沪深300":
+                bench_ret_series["沪深300"] = (
+                    df.set_index(pd.to_datetime(df["date"]))["close"].pct_change().dropna())
         if name not in pe_indexes:
             continue
-        pe = fetch_section(lambda s=name: fetcher.pe_history(s), f"{name}PE")
+        pe = fetch_section(lambda s=PE_SYMBOL[name]: fetcher.pe_history(s), f"{PE_SYMBOL[name]}PE")
         if pe is not None and not pe.empty:
             last_pe = pe.iloc[-1]["pe"]
             r = pct_rank(pe["pe"], last_pe)
@@ -598,8 +820,12 @@ def main():
                     ctx["csi500_pe_full"] = pe
                     ctx.setdefault("bench_ret_63", {})["csi500"] = (
                         float(last["close"] / df["close"].iloc[-63] - 1) if len(df) > 63 else None)
+                elif name == "创业板指":
+                    ctx["csi_cyb_pe_pctile"] = float(r)
+                    ctx["csi_cyb_mom20"] = float(m20)
                 pe_tag = "偏高" if r > 0.7 else ("中性" if r >= 0.3 else "低估")
                 L(f"  - PE 分位 {r*100:.0f}%（{pe_tag}），20日动量 {m20:+.1%}")
+    ctx["index_5d_trend"] = index_5d_trend
     us = fetch_section(fetcher.us_index, "标普500")
     if us is not None and len(us) >= 2:
         us_pct = us.iloc[-1]["pct"]
@@ -612,7 +838,7 @@ def main():
     L(f"## 估值温度 (近{PE_HIST_YEARS}年分位)")
     val_lines = []
     for name in pe_indexes:
-        pe = fetch_section(lambda s=name: fetcher.pe_history(s), f"{name}PE")
+        pe = fetch_section(lambda s=PE_SYMBOL[name]: fetcher.pe_history(s), f"{PE_SYMBOL[name]}PE")
         if pe is None or pe.empty:
             val_lines.append(f"- {name}: 无数据")
             continue
@@ -622,13 +848,16 @@ def main():
             val_lines.append(f"- {name}: 无数据")
             continue
         tag = "低估" if r < 0.3 else ("合理" if r <= 0.7 else "偏高")
-        pe_full = fetch_section(lambda s=name: fetcher.pe_history_full(s), f"{name}PE全史")
+        pe_full = fetch_section(lambda s=PE_SYMBOL[name]: fetcher.pe_history_full(s), f"{PE_SYMBOL[name]}PE全史")
         sens = ""
         if pe_full is not None and not pe_full.empty:
             r_full = pct_rank(pe_full["pe"], last_pe)
             if r_full is not None:
                 sens = f"（全历史分位 {r_full*100:.0f}%）"
-        val_lines.append(f"- {name}: PE {last_pe:.2f}，近{PE_HIST_YEARS}年分位 {r*100:.0f}%（{tag}）{sens}")
+        label = f"{name}*" if name == "创业板指" else name
+        val_lines.append(f"- {label}: PE {last_pe:.2f}，近{PE_HIST_YEARS}年分位 {r*100:.0f}%（{tag}）{sens}")
+    if "创业板指" in pe_indexes:
+        val_lines.append("*创业板指以创业板50成分股PE为代理（乐咕口径）")
     mpe = fetch_section(fetcher.market_pe, "全市场PE")
     if mpe is not None and not mpe.empty:
         val_lines.append(f"- 全市场(上证): PE {mpe.iloc[-1]['平均市盈率']:.2f}")
@@ -679,6 +908,7 @@ def main():
         L(f"- 中国10年期国债: {y10:.2f}%，分位 {r*100:.0f}%（{bond_src}）")
         L(f"- 期限利差(10Y-2Y): {safe_format(spread, '{:+.2f}')}{'（倒挂，警惕）' if spread == spread and spread < 0 else ''}")
         bond_ctx["10年期国债"] = f"{y10:.2f}%，分位 {r*100:.0f}%"
+        ctx["y10_pctile"] = r
         if r < 0.3:
             bond_sig = -1.0
             L(f"- 债券研判: 利率处低位、债价偏贵；战略方向以「今日跟投指令」为准")
@@ -694,6 +924,12 @@ def main():
         bond_ctx["LPR"] = f"1Y {lpr_row['LPR1Y']:.2f}%，5Y {lpr_row['LPR5Y']:.2f}%"
     ctx["bond"] = bond_ctx
     ctx["signal_bond"] = stance_label(bond_sig) if bond_sig is not None else "无数据"
+
+    # 中证全债指数（组合基准对比用；失败不阻塞，基准字段降级为 None）
+    bdf = fetch_once(lambda: fetcher.index_daily("sh000923"), "中证全债")
+    if bdf is not None and not bdf.empty and len(bdf) > 60:
+        bench_ret_series["中证全债"] = (
+            bdf.set_index(pd.to_datetime(bdf["date"]))["close"].pct_change().dropna())
 
     # 宏观扩展（V2.2 指标扩容）
     L("")
@@ -772,6 +1008,10 @@ def main():
         v = ctx["csi500_pe_pctile"]
         tag = "偏高" if v > 0.7 else ("中性" if v >= 0.3 else "低估")
         temp_lines.append(f"- 中证500估值：分位 {v*100:.0f}%（{tag}）")
+    if ctx.get("csi_cyb_pe_pctile") is not None:
+        v = ctx["csi_cyb_pe_pctile"]
+        tag = "偏高" if v > 0.7 else ("中性" if v >= 0.3 else "低估")
+        temp_lines.append(f"- 创业板估值（50成分代理）：分位 {v*100:.0f}%（{tag}）")
     if ep_ctx:
         temp_lines.append(f"- 股债性价比：分位 {ep_ctx['pctile']*100:.0f}%｜人话：{('买股票多赚的差价已经很薄，性价比不高' if ep_ctx['pctile'] < 0.3 else '股票相对债券的性价比正常')}")
     if bond is not None and not bond.empty and not pd_isna(y10):
@@ -818,7 +1058,8 @@ def main():
             product_ctxs.append(pctx)
             nav_s = pctx.get("nav_series")
             if nav_s is not None and len(nav_s) > 30:
-                returns_map[p["code"]] = nav_s["nav"].pct_change().dropna()
+                returns_map[p["code"]] = (
+                    nav_s.set_index(pd.to_datetime(nav_s["date"]))["nav"].pct_change().dropna())
     ctx["products"] = product_ctxs
 
     # ---------- 7. 组合与跟投指令 ----------
@@ -854,7 +1095,8 @@ def main():
         L(f"- 客户组合（总市值 ¥{total_mv:,.0f}，跟投份数 {cfg.get('portfolio', {}).get('follow_units', 1)}）")
         eq_target, rule_triggers = rules.equity_target(cfg, ctx)
         storm_active, storm_reasons = rules.storm_lock(eq_target, rule_triggers)
-        ep_lock = (not storm_active) and (ctx.get("ep_premium_pctile") is not None) and (ctx["ep_premium_pctile"] < 0.10)
+        ep_thr = rules.ep_threshold(ctx) if hasattr(rules, "ep_threshold") else 0.10
+        ep_lock = (not storm_active) and (ctx.get("ep_premium_pctile") is not None) and (ctx["ep_premium_pctile"] < ep_thr)
         cooldown_active = state_store.in_cooldown(cfg)
 
         pctx_map = {p.get("code", ""): p for p in product_ctxs}
@@ -935,9 +1177,29 @@ def main():
              "product_name": {pc["code"]: pc.get("name", pc["code"]) for pc in product_ctxs},
              "tp_ctx": tp_ctx_map,
              "nav": nav_map,
-             "total": total_mv},
+             "total": total_mv,
+             "product_ctx": pctx_map},
             storm_active=storm_active, storm_reasons=storm_reasons, ep_lock=ep_lock,
             cooldown_active=cooldown_active, today=today)
+
+        # ---- 昨日信号回顾（学习闭环：昨日推荐 + 昨日止盈信号；无数据不显示板块） ----
+        y_recs = state_store.get_yesterday_recommendations()
+        y_sigs = [s for s in state_store.get_recent_signals(days=2)
+                  if str(s.get("signal_date", ""))[:10] < today]
+        recap_line = None
+        try:
+            recap_line = cro.get_yesterday_recap_line(y_recs, y_sigs) if hasattr(cro, "get_yesterday_recap_line") else None
+        except Exception:
+            recap_line = None
+        if recap_line:
+            L("")
+            L(f"## 昨日信号回顾")
+            L(f"- {recap_line}")
+            for y in y_recs:
+                L(f"- 昨日关注：{y.get('name', '')}（{y.get('reason', '')}）｜今日对照见上方「指标温度表」")
+            for ys in y_sigs:
+                cur = "延续" if any(v.get("code") == ys.get("code") for v in tp_actions.values()) else "未延续"
+                L(f"- 昨日止盈观察：{ys.get('code')}（{ys.get('action')}）｜今日信号：{cur}")
 
         # ---- CRO 叙事 ----
         bond_codes = {p.get("code", "") for p in products if p.get("type") == "bond"}
@@ -945,6 +1207,7 @@ def main():
             orders=orders, equity_target=eq_target, storm_active=storm_active,
             storm_reasons=storm_reasons, ep_lock=ep_lock,
             ep_pctile=ctx.get("ep_premium_pctile"),
+            ep_thr=ep_thr,
             triggers=rule_triggers, product_sells=product_sells,
             tp_signals=tp_actions, cooldown_active=cooldown_active,
             bond_codes=bond_codes))
@@ -963,6 +1226,9 @@ def main():
                 L(f"- {code}：建议落袋约 {a['amount']:,.0f} 元")
                 L(f"  原因：{a['reason']}")
             L("*止盈目标线算法处于 6 个月观察期，信号仅供跟踪与评估，暂不生成执行指令。*")
+        sstats = state_store.shadow_stats(cfg)
+        if sstats.get("start"):
+            L(f"- 影子模式已运行 {sstats['days']} 天（起始 {sstats['start']}，6个月观察期），累计记录 {sstats['signals']} 次信号，涉及 {sstats['products']} 个产品")
         if repeat_signals:
             L("")
             L(f"- 信号延续提示：{'、'.join(v['name'] for v in repeat_signals.values())} 的止盈信号与近 5 个交易日已提示的一致，"
@@ -1041,8 +1307,21 @@ def main():
         ctx["storm_active"] = storm_active
 
         # ---- 组合诊断 + 前瞻模拟 ----
+        diag_data = {"returns": returns_map, "weights": weights_map}
+        if bench_ret_series:
+            eq_base = cfg.get("target", {}).get("equity", {})
+            eq_w = float(eq_base.get("base", 0.40)) if isinstance(eq_base, dict) else float(eq_base)
+            bw = {}
+            if "沪深300" in bench_ret_series:
+                bw["沪深300"] = max(0.0, min(1.0, eq_w))
+            if "中证全债" in bench_ret_series:
+                bw["中证全债"] = 1.0 - sum(bw.values())
+            if bw and sum(bw.values()) > 0:
+                diag_data["bench_returns"] = bench_ret_series
+                diag_data["bench_weights"] = bw
+                bench_weights = bw
         diag = rules.portfolio_diagnostics(
-            cfg, products, {"returns": returns_map, "weights": weights_map})
+            cfg, products, diag_data)
         if diag:
             L("")
             L(f"## 组合诊断")
@@ -1050,6 +1329,11 @@ def main():
             L(f"- 年化波动率 {diag['vol']*100:.1f}%｜人话：一年里收益上蹿下跳的平均幅度")
             L(f"- 250日最大回撤 {diag['max_dd']*100:.1f}%｜人话：历史上从最高点最多跌过这么多")
             L(f"- 日度 VaR95 {diag['var95']*100:.2f}%（历史分位法）｜人话：按历史规律，一天最坏大概率不会亏超过这个数")
+            if diag.get("alpha") is not None:
+                bench_names = " + ".join(f"{k}{v*100:.0f}%" for k, v in diag_data.get("bench_weights", {}).items())
+                L(f"- vs 基准（{bench_names}）：年化超额收益 {diag['excess_ann']*100:+.2f}%（alpha {diag['alpha']*100:+.2f}%，beta {diag['beta']:.2f}，信息比率 {diag['ir']:.2f}）｜人话：过去一年组合比基准多赚/少赚多少")
+            else:
+                L(f"- 基准对比：数据不足，暂缺（需≥60个对齐交易日）")
             total_exp = 0.0
             for p in products:
                 fcode = p.get("code", "")
@@ -1140,6 +1424,7 @@ def main():
         if kb:
             kb_parts.append(f"[{p.get('code')}] {kb}")
     ctx["kb_summary"] = "\n".join(kb_parts) if kb_parts else "暂无档案"
+    ctx["yesterday_recap"] = recap_line or None
     if tp_actions:
         ctx["tp_signal_text"] = "；".join(f"{k} 建议落袋 {v['amount']:,.0f} 元（影子模式）" for k, v in tp_actions.items())
     else:
@@ -1188,20 +1473,69 @@ def main():
             fallback = cro.get_narrative() if cro else "今日无规则触发，维持当前持仓。"
             report_full += f"\n## 今日指令解读\n> {fallback}"
 
-    # ---------- 11. 今日一句话 + 指令摘要置顶 ----------
+    # ---------- 11. 今日一句话 + 指令摘要置顶 + 新鲜度警告 ----------
+    # 头部警告（1.4/2.2）：核心数据滞后或严重缺失
+    stale_codes = [pc.get("code", "") for pc in product_ctxs if pc.get("nav_stale")]
+    warn_lines = []
+    if not ctx.get("indexes") or ctx.get("csi300_pe_pctile") is None:
+        warn_lines.append("> ⚠️ 本报告核心数据（指数行情/估值）严重缺失，请勿作为操作依据")
+    elif stale_codes or stale_indexes:
+        warns = []
+        if stale_codes:
+            warns.append(f"{'、'.join(stale_codes[:3])} 净值更新滞后")
+        if stale_indexes:
+            warns.append(f"{'、'.join(stale_indexes[:3])} 行情非当日")
+        warn_lines.append(f"> ⚠️ 部分数据非最新（{'；'.join(warns)}），请谨慎参考")
     if total_mv > 0 and cro is not None:
         top = [f"## 今日一句话", f"> {cro.get_headline()}", ""]
+        if warn_lines:
+            top.insert(1, warn_lines[0])
         top.append(cro.get_summary())
         report_full = "\n".join(top) + "\n\n" + report_full
 
-    # ---------- 12. 输出：完整版 md + HTML + 精简版推送 ----------
+    # ---------- 11.5 系统运行状态（数据源成败一览，2.3） ----------
+    status_lines = []
+    ok_n, fail_n = 0, 0
+    for nm, st in FETCH_STATUS.items():
+        if st == "ok":
+            ok_n += 1
+            status_lines.append(f"- {nm} ✓")
+        else:
+            fail_n += 1
+            status_lines.append(f"- {nm} ✗（{st}）")
+    if FETCH_STATUS:
+        report_full += ("\n## 系统运行状态\n"
+                        f"- 本次共采集 {len(FETCH_STATUS)} 项：成功 {ok_n}，失败/降级 {fail_n}\n"
+                        + "\n".join(status_lines)
+                        + "\n*数据源失败时系统已自动降级，指令仍按可用数据生成；严重缺失时上方已显著提示。*")
+
+    # ---------- 12.5 状态快照（3.4：跨日持久化到 knowledge_base，随 Actions commit 回写） ----------
+    try:
+        state_store.write_state_snapshot({
+            "date": today,
+            "orders": [{"side": o.get("side"), "code": o.get("code"), "amount": o.get("amount")} for o in orders],
+            "target_alloc": target_alloc,
+            "pending_cash": state_store.pending_cash(cfg),
+            "total_mv": total_mv,
+            "tp_signals": [{"code": c, "action": v.get("action")} for c, v in tp_ctx_map.items()],
+        })
+    except Exception as e:
+        log(f"[WARN] 状态快照写入失败: {str(e)[:80]}")
+
+    # ---------- 13. 输出：完整版 md + HTML + 精简版推送 ----------
     os.makedirs(REPORT_DIR, exist_ok=True)
     md_path = os.path.join(REPORT_DIR, f"report_{today}.md")
     html_path = os.path.join(REPORT_DIR, f"report_{today}.html")
     latest_html = os.path.join(REPORT_DIR, "latest.html")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# {title}\n\n" + report_full)
-    page = html_render.render(report_full, title)
+    try:
+        chart_data = build_chart_data(ctx, mv_map, returns_map, weights_map,
+                                      bench_ret_series, total_mv, bench_weights)
+    except Exception as e:
+        chart_data = {}
+        log(f"[WARN] 图表数据组装失败: {str(e)[:80]}")
+    page = html_render.render(report_full, title, charts=chart_data)
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(page)
     with open(latest_html, "w", encoding="utf-8") as f:

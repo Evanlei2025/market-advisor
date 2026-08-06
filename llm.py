@@ -22,7 +22,7 @@ BLACKLIST_PATTERNS = [
     r"可以(考虑|尝试).{0,10}(买入|加仓|建仓|申购|追加)",
     r"逢低|择机|伺机",
 ]
-_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+_NUM_RE = re.compile(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?")
 _ID_RE = re.compile(r"[A-Z]{2,}(?:-[A-Z0-9]+)+")
 
 
@@ -71,6 +71,7 @@ SYSTEM_PROMPT = """你是投顾日报的"指令解读员"与"风险提示员"，
 - **去重纪律**：各板块解读禁止复述自己板块数据行已列出的数值（数据行客户已看到）；每板块最多引用1个数值支撑观点
 - **数据缺失纪律**：某板块缺失时写"今日该板块数据未更新"，严禁编造
 - **产品解读纪律**：products 中每条 advice 只针对本产品，不得提及其他产品编号或名称
+- **跨市场联动纪律**：市场速览或宏观板块最多 1 句跨市场联动（如“利率下行往往利好债券”），必须绑定快照数值，不增加字数上限之外的长度（保持各板块≤70字硬约束不变）
 
 ## 长度硬约束（超出即废稿）
 market/valuation/bond/gold/macro 各≤70字；action≤200字；risk 每条≤45字；产品解读每条≤70字。
@@ -96,6 +97,26 @@ market/valuation/bond/gold/macro 各≤70字；action≤200字；risk 每条≤4
   ],
   "risks": ["风险1（≤45字）", "风险2（≤45字）", "风险3（≤45字）"]
 }"""
+
+
+def _fmt_5d_trend(trend):
+    if not trend:
+        return "未提供"
+    parts = []
+    for name, chg in trend.items():
+        s = str(chg).strip()
+        num = s.lstrip("+-")
+        try:
+            v = abs(float(num.rstrip("%").strip()))
+        except ValueError:
+            v = None
+        if v is not None and v < 1e-9:
+            parts.append(name + "累计持平")
+        elif s.startswith("-"):
+            parts.append(name + "累计下跌" + num)
+        else:
+            parts.append(name + "累计上涨" + num)
+    return "、".join(parts) + "（趋势方向参考，解读中禁止引用具体数字）"
 
 
 def build_user_prompt(ctx):
@@ -125,12 +146,18 @@ def build_user_prompt(ctx):
         f"- 黄金: {fmt_sig(ctx.get('gold', {}))}",
         f"- 宏观: {fmt_sig(ctx.get('macro', {}))}",
         "",
+        "## 近5日指数趋势（辅助理解，非权威数值，解读时禁用这些数字）",
+        "- " + _fmt_5d_trend(ctx.get("index_5d_trend")),
+        "",
         "## 权益目标浮动区间（AI 微调唯一允许的决策字段）",
         f"- 浮动区间: {ctx.get('equity_band', '未提供')}（equity_target_advice 必须落在该区间内）",
         f"- 规则引擎基准: {ctx.get('equity_target', '未提供')}",
         "",
         "## 止盈信号（影子模式，仅记录）",
         f"- {ctx.get('tp_signal_text', '今日无止盈信号')}",
+        "",
+        "## 昨日信号回顾（今日验证用，禁止编造）",
+        "- " + (ctx.get("yesterday_recap") or "无"),
         "",
         "## 理财产品数据（静态程序采集，权威数值，解读必须逐字引用）",
         "\n".join(product_lines) if product_lines else "- 今日无产品数据",
@@ -166,7 +193,7 @@ def call_deepseek(api_key, user_prompt, timeout=180):
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.4,
-        "max_tokens": 3000,
+        "max_tokens": 5000,
         "response_format": {"type": "json_object"},
     }
     r = requests.post(

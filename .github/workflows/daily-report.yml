@@ -34,6 +34,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Dependency consistency check
+        run: |
+          python -m pip check
+          python -c "import akshare, pandas, requests; print('akshare', akshare.__version__, '| pandas', pandas.__version__)"
+
       - name: Run daily report
         env:
           ADVISOR_CONFIG_JSON: ${{ secrets.ADVISOR_CONFIG }}
@@ -74,3 +79,14 @@ jobs:
       - name: Deploy to Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SC_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: |
+          if [ -n "$SC_KEY" ]; then
+            curl -s -X POST "https://sctapi.ftqq.com/${SC_KEY}.send" \
+              -d "title=投顾日报运行失败" \
+              -d "desp=GitHub Actions 运行失败，请查看仓库 Actions 日志。" > /dev/null
+          fi

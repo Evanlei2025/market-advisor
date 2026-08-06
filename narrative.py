@@ -16,8 +16,9 @@ RULE_PRINCIPLES = {
     "LAD-CSI300-90": "市场贵得离谱（90%分位以上），进一步压缩股票仓位。",
     "LAD-CSI300-95": "市场贵到历史极值，几乎不买股票了。",
     "LAD-CSI500-75": "中证500比过去十年75%的时间都贵，而且最近20天还在跌，先躲开。",
+    "LAD-CYB-90": "创业板指比过去十年90%的时间都贵，成长股买贵了风险大，所以压减股票仓位。",
     "MIN-MERGE": "多个指标同时亮灯，取最保守的那一个，宁少勿多。",
-    "EP-CAP-10": "买股票比买债券多赚的差价已经压得很薄，性价比不高，先不加股票。",
+    "EP-CAP-10": "股债性价比低于动态阈值（随利率环境在5%~15%间浮动）时触发安全阀，锁定权益上限，暂不加股票。",
     "STORM-5": "市场同时出现'太贵'和'跌得急'两个危险信号，暂时冻结买入、拿着现金观望，等信号解除。",
     "REB-EQ": "按计划把各块钱的分配调回目标比例（股票不够了，补一点）。",
     "REB-BOND": "按计划把各块钱的分配调回目标比例（稳健部分不够了，补一点）。",
@@ -50,6 +51,7 @@ class CROInput:
         self.storm_reasons = kw.get("storm_reasons", [])
         self.ep_lock = kw.get("ep_lock", False)
         self.ep_pctile = kw.get("ep_pctile")
+        self.ep_thr = kw.get("ep_thr", 0.10)
         self.triggers = kw.get("triggers", [])
         self.product_sells = kw.get("product_sells", [])
         self.bond_sig = kw.get("bond_sig")
@@ -79,7 +81,7 @@ class CRO:
         if s == "STORM":
             return "市场预警：估值与动量同时达警戒，今日买入冻结，持有现金观望。"
         if s == "EP":
-            return "战略防御：股票性价比偏低，权益上限锁定10%，稳健部分照常。"
+            return f"战略防御：股票性价比偏低，权益上限锁定{self.i.ep_thr*100:.0f}%，稳健部分照常。"
         if s == "SIGNAL":
             return "止盈信号（观察期）：有产品达到目标收益，建议落袋部分利润。"
         if s == "REGULAR":
@@ -108,8 +110,9 @@ class CRO:
                 if t.get("id") == "EP-CAP-10" and "已激活" in t.get("text", ""):
                     ep_txt = t["text"]
                     break
-            return (f"当前股债性价比进入极端区域（EP分位<10%），触发资产配置安全阀（{ep_txt}）。"
-                    f"根据纪律，权益仓位上限强制约束至 10%。这不是清仓信号，而是基于估值纪律的均衡调整。")
+            thr_txt = f"（动态阈值 {self.i.ep_thr*100:.0f}%）" if self.i.ep_thr else ""
+            return (f"当前股债性价比进入极端区域（EP分位{thr_txt}），触发资产配置安全阀（{ep_txt}）。"
+                    f"根据纪律，权益仓位上限强制约束至 {self.i.ep_thr*100:.0f}%。这不是清仓信号，而是基于估值纪律的均衡调整。")
         if s == "SIGNAL":
             names = "、".join(v.get("name", k) for k, v in self.i.tp_signals.items())
             return (f"观察期内止盈信号：{names} 已达到动态目标收益线。"
@@ -131,6 +134,30 @@ class CRO:
             return "今日无规则触发，维持当前持仓。不操作就是最好的操作，耐心等待值得出手的信号。"
         return None
 
+    def get_yesterday_recap_line(self, recs=None, signals=None):
+        '''昨日回顾辅助（纯确定性，约120字内）：recs=昨日推荐 [{name,type,reason}]，
+        signals=最近信号 [{code,action,signal_date}]；两者皆空返回 None（调用方不显示板块）。
+        不引用任何外部数值，数值由调用方注入。'''
+        names, codes = [], []
+        for r in recs or []:
+            if isinstance(r, dict):
+                n = str(r.get("name", "")).strip()
+                if n and n not in names:
+                    names.append(n)
+        for s in signals or []:
+            if isinstance(s, dict):
+                c = str(s.get("code", "")).strip()
+                if c and c not in codes:
+                    codes.append(c)
+        parts = []
+        if names:
+            parts.append("昨日关注了" + "、".join(names) + "，今天检查它们是否值得继续关注")
+        if codes:
+            parts.append("昨日对" + "、".join(codes) + "有止盈观察信号（影子模式），今天信号延续与否以报告为准")
+        if not parts:
+            return None
+        return "；".join(parts)
+
     def get_storm_status_line(self):
         if not self.i.storm_active:
             return ""
@@ -141,7 +168,8 @@ class CRO:
         if not self.i.ep_lock or self.i.storm_active:
             return ""
         ep = f"（分位 {self.i.ep_pctile*100:.0f}%）" if self.i.ep_pctile is not None else ""
-        return (f"战略预警：[EP-CAP-10] 股债性价比进入极值区域{ep}，权益上限锁定 10%，"
+        thr_txt = f"{self.i.ep_thr*100:.0f}%" if self.i.ep_thr else "动态阈值"
+        return (f"战略预警：[EP-CAP-10] 股债性价比进入极值区域{ep}，权益上限锁定 {thr_txt}，"
                 f"暂停权益增持；稳健部分再平衡照常执行。")
 
     def get_anchor_text(self):
@@ -194,7 +222,7 @@ class CRO:
         elif s == "EP":
             ep_trig = next((t for t in self.i.triggers if t.get("id") == "EP-CAP-10"), None)
             out.append(">")
-            out.append(f"> **触发链**：[EP-CAP-10] {ep_trig.get('text', '') if ep_trig else 'EP溢价分位 < 10%'}")
+            out.append(f"> **触发链**：[EP-CAP-10] {ep_trig.get('text', '') if ep_trig else f'EP溢价分位低于动态阈值 {self.i.ep_thr*100:.0f}%'}")
             out.append(">")
             out.append("> 此为估值纪律驱动的均衡调整，与市场预警的买入冻结有本质区别。")
         elif s == "SIGNAL":

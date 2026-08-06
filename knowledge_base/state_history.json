@@ -1,0 +1,29 @@
+[
+  {
+    "date": "2026-08-06",
+    "orders": [],
+    "target_alloc": {
+      "equity": 0.05,
+      "bond": 0.85,
+      "cash": 0.1
+    },
+    "pending_cash": [
+      {
+        "code": "006195",
+        "side": "赎回",
+        "shares": 116.78,
+        "apply_date": "2026-08-05",
+        "confirm_date": "2026-08-06",
+        "settle_date": "2026-08-10",
+        "note": "用户自行操作，占原持仓1/3"
+      }
+    ],
+    "total_mv": 2470.40619,
+    "tp_signals": [
+      {
+        "code": "006195",
+        "action": "tp_dd"
+      }
+    ]
+  }
+]

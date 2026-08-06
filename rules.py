@@ -3,6 +3,8 @@
 输入必须是数据，输出必须是确定的仓位操作。AI 无权修改本模块的输出。
 V2.3：市值口径算账、动态止盈（上限门+峰值回撤保护+短仓地板+费后口径+单向穿越取最高档）、
 买入冻结（市场预警，仅最保守仓位档）、关注池买入（含零持仓）、冷却期、在途资金。
+5.x：创业板估值信号(LAD-CYB-90)、EP安全阀动态阈值(5.4)、止盈边界完善(5.5)、
+组合基准对比(5.1)、买入候选评分(5.2)、配置静态校验(5.6)。
 """
 import math
 
@@ -16,8 +18,9 @@ RULE_IDS = {
     "LAD-CSI300-90": "沪深300阶梯上限20%",
     "LAD-CSI300-95": "沪深300阶梯上限5%",
     "LAD-CSI500-75": "中证500阶梯上限5%",
+    "LAD-CYB-90": "创业板指阶梯上限5%",
     "MIN-MERGE": "最保守合并",
-    "EP-CAP-10": "EP安全阀(权益≤10%)",
+    "EP-CAP-10": "EP安全阀(权益≤动态阈值)",
     "STORM-5": "市场预警-最保守仓位5%",
     "REB-EQ": "再平衡-买入权益",
     "REB-BOND": "再平衡-买入固收",
@@ -30,9 +33,29 @@ def _trig(rid, text):
 
 
 # ---------------- 权益目标（阶梯 + EP + 动态区间） ----------------
+def ep_threshold(ctx):
+    """EP 安全阀动态阈值（5.4）：10Y 国债收益率十年分位越低 → 股债性价比越极端时越保守。
+    y10_pctile < 0.2 → 0.15；0.2-0.8 → 0.10；> 0.8 → 0.05；缺失/NaN/非法 → 默认 0.10。"""
+    ctx = ctx if isinstance(ctx, dict) else {}
+    y10 = ctx.get("y10_pctile")
+    try:
+        y10 = float(y10)
+    except Exception:
+        return 0.10
+    if y10 != y10:      # NaN 防护
+        return 0.10
+    if y10 < 0.2:
+        return 0.15
+    if y10 > 0.8:
+        return 0.05
+    return 0.10
+
+
 def equity_target(cfg, ctx):
-    """计算今日权益目标（最保守原则 + 股债性价比锁定）。
+    """计算今日权益目标（最保守原则 + 股债性价比锁定 + 创业板估值信号）。
     返回 (target, triggers)；target 为区间基准值，由调用方套 target.band 形成区间。"""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    ctx = ctx if isinstance(ctx, dict) else {}
     base = cfg.get("target", {}).get("equity", {})
     base_val = base.get("base", 0.40) if isinstance(base, dict) else base
     triggers = []
@@ -61,19 +84,28 @@ def equity_target(cfg, ctx):
             triggers.append(_trig("LAD-CSI500-75",
                                   f"中证500 PE分位 {p500*100:.0f}% 且 20日动量 {m500:+.1%} < -5% → 权益上限 5%"))
 
+    # 5.3 创业板指估值信号：PE 十年分位 ≥ 90% → 权益上限 5%（独立于 STORM-5，不参与买入冻结）
+    pcyb = ctx.get("csi_cyb_pe_pctile")
+    if pcyb is not None and pcyb >= 0.90:
+        candidates.append(0.05)
+        triggers.append(_trig("LAD-CYB-90",
+                              f"创业板指 PE分位 {pcyb*100:.0f}% ≥ 90% → 权益上限 5%"))
+
     target = min(candidates) if candidates else base_val
     if candidates:
         triggers.append(_trig("MIN-MERGE", f"最保守原则：最终权益目标 = min(各规则值) = {target*100:.0f}%"))
 
+    # 5.4 EP 安全阀动态阈值：按 10Y 国债分位取 0.15/0.10/0.05（规则 ID 不变，仅阈值与文案动态）
     ep = ctx.get("ep_premium_pctile")
     if ep is not None:
-        if ep < 0.10:
-            target = min(target, 0.10)
+        ep_thr = ep_threshold(ctx)
+        if ep < ep_thr:
+            target = min(target, ep_thr)
             triggers.append(_trig("EP-CAP-10",
-                                  f"股债性价比极端约束：分位 {ep*100:.0f}% < 10% → 已激活，权益目标强制 ≤ 10%"))
+                                  f"股债性价比极端约束：分位 {ep*100:.0f}% < {ep_thr*100:.0f}% → 已激活，权益目标强制 ≤ {ep_thr*100:.0f}%"))
         else:
             triggers.append(_trig("EP-CAP-10",
-                                  f"股债性价比极端约束：分位 {ep*100:.0f}% > 10% → 不触发权益仓位上限锁定（安全阀未激活）"))
+                                  f"股债性价比极端约束：分位 {ep*100:.0f}% ≥ {ep_thr*100:.0f}% → 不触发权益仓位上限锁定（安全阀未激活）"))
     return target, triggers
 
 
@@ -176,7 +208,11 @@ def compute_take_profit(cfg, pctx, ctx):
     返回 dict {class, sigma_ann, F_vol, F_hold, F_sector, T_base, T_pre, T_cap, T_eff,
                peak_r_hold, dd_ret, dd_thr} 或 None（数据不足）
     """
-    tp = cfg.get("rules", {}).get("take_profit", {})
+    cfg = cfg if isinstance(cfg, dict) else {}
+    ctx = ctx if isinstance(ctx, dict) else {}
+    if not isinstance(pctx, dict):
+        return None
+    tp = (cfg.get("rules") or {}).get("take_profit") or {}
     nav_series = pctx.get("nav_series")
     if nav_series is None or len(nav_series) < 30:
         return None
@@ -297,7 +333,9 @@ def take_profit_signal(cfg, pctx, ctx):
           "exposure", "lots", "today", "fee_rate"}
     action: "tp_1of3"/"tp_2of3"/"tp_rest"/"tp_dd"/None
     """
-    tp = cfg.get("rules", {}).get("take_profit", {})
+    cfg = cfg if isinstance(cfg, dict) else {}
+    ctx = ctx if isinstance(ctx, dict) else {}
+    tp = (cfg.get("rules") or {}).get("take_profit") or {}
     st = compute_take_profit(cfg, pctx, ctx)
     if st is None:
         return None, "", None, None
@@ -316,9 +354,20 @@ def take_profit_signal(cfg, pctx, ctx):
     if fee is None or fee != fee:
         fee = 0.005
     margin = tp.get("fee_margin", 0.01)
-    gap = tp.get("tier_gap", [0.05, 0.10])
-    if not isinstance(gap, list) or len(gap) < 2:
-        gap = [0.05, 0.10]
+    # 止盈档间距（5.5b）：config 显式 tier_gap 优先（向后兼容）；否则按年化波动率动态分档
+    gap_cfg = tp.get("tier_gap")
+    if isinstance(gap_cfg, list) and len(gap_cfg) >= 2:
+        gap = list(gap_cfg)
+    else:
+        s_sigma = st.get("sigma_ann")
+        if s_sigma is None or s_sigma != s_sigma:
+            gap = [0.05, 0.10]
+        elif s_sigma < 0.15:
+            gap = [0.05, 0.10]
+        elif s_sigma < 0.30:
+            gap = [0.07, 0.14]
+        else:
+            gap = [0.10, 0.20]
 
     # 门槛：≤1 年按持有年数折算（带 6% 地板）；>1 年按年化
     if hold_years <= 1.0:
@@ -337,10 +386,10 @@ def take_profit_signal(cfg, pctx, ctx):
     lv2 = level_for(st["T_eff"] + gap[0]) + fee + margin
     lv3 = level_for(st["T_eff"] + gap[1]) + fee + margin
 
-    # 回撤保护：峰值收益曾 ≥ T_eff 且收益自高点回撤 ≥ DD_thr 且当前盈利
+    # 回撤保护（5.5a）：峰值收益曾 ≥ T_eff 且自高点回撤 ≥ DD_thr 即触发；
+    # 不再要求当前仍盈利——从大幅盈利直接跌穿成本线的场景同样进入保护
     peak_r = st["peak_r_hold"]
-    dd_hit = (peak_r is not None and st["r_hold"] > 0
-              and peak_r >= st["T_eff"] and st["dd_ret"] >= st["dd_thr"])
+    dd_hit = (peak_r is not None and peak_r >= st["T_eff"] and st["dd_ret"] >= st["dd_thr"])
 
     # 单向穿越检测（基于今日 vs 昨日；等值也视为穿越，消除漏检）
     # 三档各自独立穿越判定，取穿越的最高档 → 跳档自然取最高档，且无持续性重复触发
@@ -352,8 +401,13 @@ def take_profit_signal(cfg, pctx, ctx):
     rid = None
     if dd_hit:
         action, rid = "tp_dd", "TP-DD"
-        detail = (f"回撤保护：持有收益 {r_hold*100:.1f}%（峰值 {peak_r*100:.1f}% ≥ 目标线 {st['T_eff']*100:.1f}%），"
-                  f"自高点回撤 {st['dd_ret']*100:.1f}% ≥ {st['dd_thr']*100:.1f}% → 建议清仓")
+        if r_hold <= 0:
+            detail = (f"回撤保护：当前虽已转亏/微利（持有收益 {r_hold*100:.1f}%），"
+                      f"但峰值曾达 {peak_r*100:.1f}% ≥ 目标线 {st['T_eff']*100:.1f}%，"
+                      f"自高点回撤 {st['dd_ret']*100:.1f}% ≥ {st['dd_thr']*100:.1f}% → 建议清仓")
+        else:
+            detail = (f"回撤保护：持有收益 {r_hold*100:.1f}%（峰值 {peak_r*100:.1f}% ≥ 目标线 {st['T_eff']*100:.1f}%），"
+                      f"自高点回撤 {st['dd_ret']*100:.1f}% ≥ {st['dd_thr']*100:.1f}% → 建议清仓")
     else:
         hit = []
         if crossed(lv1):
@@ -415,6 +469,109 @@ def settlement_of(cfg, product):
     return spec
 
 
+def _piecewise(x, pts):
+    """分段线性插值（单调节点升序列表）。"""
+    x = float(x)
+    if x <= pts[0][0]:
+        return float(pts[0][1])
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x <= x1:
+            return float(y0 + (y1 - y0) * (x - x0) / (x1 - x0))
+    return float(pts[-1][1])
+
+
+def score_candidate(pctx, cfg):
+    """买入候选评分（5.2）。维度：夏普40 / 最大回撤20 / 费率15 / 规模10 / 同类排名10。
+    缺失维度跳过并按剩余权重比例重归一；全部缺失返回 None（不参与排序，排最后）。
+    分数区间 0-100，越高越优；纯确定性：同一 pctx 恒得同一分。"""
+    if pctx is None or not isinstance(pctx, dict):
+        return None
+    import math
+    import re
+    dims = []   # [(weight, score01)]
+
+    # 1) 夏普（40）：年化收益 / 年化波动（各 250 日化）；夏普 ≥2 计满分，≤0 计 0
+    nav = pctx.get("nav_series")
+    if nav is not None:
+        try:
+            rets = nav["nav"].pct_change().dropna()
+            if len(rets) >= 20:
+                mu = float(rets.mean()) * 250
+                vol = float(rets.std() * math.sqrt(250))
+                if vol == vol and vol > 0 and mu == mu:
+                    dims.append((40, max(0.0, min(1.0, mu / vol / 2.0))))
+        except Exception:
+            pass
+
+    # 2) 最大回撤（20）：1 - max_dd（越小越好）
+    mdd = pctx.get("max_dd")
+    if mdd is not None:
+        try:
+            mdd = float(mdd)
+            if mdd == mdd:
+                dims.append((20, max(0.0, min(1.0, 1.0 - mdd))))
+        except Exception:
+            pass
+
+    # 3) 费率（15）：管理费 + 短期赎回费（低者优；合计 ≥3% 计 0）
+    fee_parts = []
+    try:
+        for kk in ("mgmt_fee", "manage_fee", "redeem_fee", "short_redeem_fee"):
+            v = pctx.get(kk)
+            if v is None:
+                continue
+            v = float(v)
+            fee_parts.append(v / 100.0 if v > 1.0 else v)   # 兼容 "1.2" 与 "0.012" 两种写法
+        if not fee_parts:
+            fees_txt = str(pctx.get("fees") or " ")
+            for pat in (r"管理费([\d.]+)%", r"短期赎回([\d.]+)%"):
+                m = re.search(pat, fees_txt)
+                if m:
+                    fee_parts.append(float(m.group(1)) / 100.0)
+    except Exception:
+        fee_parts = []
+    if fee_parts:
+        fee_total = sum(fee_parts)
+        if fee_total == fee_total:
+            dims.append((15, max(0.0, min(1.0, 1.0 - fee_total / 0.03))))
+
+    # 4) 规模（10）：1亿-300亿适中（过小清盘风险、过大钝化；单位：亿元）
+    sc = pctx.get("scale")
+    if sc is not None:
+        try:
+            sc = float(sc)
+            if sc == sc:
+                pts = [(0.0, 0.0), (1.0, 0.2), (5.0, 0.8), (50.0, 1.0),
+                       (300.0, 1.0), (600.0, 0.6), (2000.0, 0.2)]
+                dims.append((10, _piecewise(sc, pts)))
+        except Exception:
+            pass
+
+    # 5) 同类排名（10）：解析 "近1年 12/500" → 百分位越低越优
+    rank = pctx.get("ranking")
+    if rank is not None:
+        pct = None
+        try:
+            if isinstance(rank, (int, float)):
+                pct = float(rank)
+            else:
+                m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+)", str(rank))
+                if m:
+                    den = float(m.group(2))
+                    pct = float(m.group(1)) / den if den > 0 else None
+        except Exception:
+            pct = None
+        if pct is not None and pct == pct:
+            dims.append((10, max(0.0, min(1.0, 1.0 - pct))))
+
+    if not dims:
+        return None
+    total_w = sum(dw for dw, _ in dims)
+    if total_w <= 0:
+        return None
+    return 100.0 * sum(dw * sc01 for dw, sc01 in dims) / total_w
+
+
 def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
                      ep_lock=False, cooldown_active=False, today=None):
     """生成今日跟投指令（V2.2）。
@@ -425,6 +582,9 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
           "product_ctx": {code}, "total"}
     返回 (orders[], target_alloc, summary_lines)
     """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    ctx = ctx if isinstance(ctx, dict) else {}
+    products = products if isinstance(products, list) else []
     from datetime import date
     today = today or date.today().isoformat()
     rules = cfg.get("rules", {})
@@ -517,8 +677,19 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
             cands = [p for p in products
                      if p.get("type") in ("equity", "gold") and remaining.get(p.get("code"), 0) >= 0
                      and p.get("status") in ("held", "observe")]
-            # 优先已有持仓，其次观察池
-            cands.sort(key=lambda p: (p.get("status") != "held", p.get("code", "")))
+            # 买入候选排序（5.2）：score_candidate 降序；评分缺失（数据全缺）排最后，
+            # 同分/缺失组内保持原兜底顺序（已持有优先、代码序）
+            pctx_map = ctx.get("product_ctx") or {}
+
+            def _buy_key(p):
+                sc = None
+                if pctx_map:
+                    sc = score_candidate(pctx_map.get(p.get("code", "")) or {}, cfg)
+                st_rk = 0 if p.get("status") == "held" else 1
+                if sc is None:
+                    return (1, 0, st_rk, p.get("code", ""))
+                return (0, -sc, st_rk, p.get("code", ""))
+            cands.sort(key=_buy_key)
             if cands:
                 code = cands[0]["code"]
                 amt = round(min(eq_gap, max(0.0, cash_now - cash_target_amt)), 2)
@@ -666,7 +837,10 @@ def hold_metrics(holdings, nav_series_map, nav_latest_map, cost_map=None):
 
 
 def portfolio_diagnostics(cfg, products, ctx):
-    """组合诊断：年化波动率 / 250日最大回撤 / VaR95 / 实际权益暴露度"""
+    """组合诊断：年化波动率 / 250日最大回撤 / VaR95 / 实际权益暴露度。
+    5.1：可选基准对比（bench_returns/bench_weights）→ excess_ann/alpha/beta/ir；
+    基准缺失或对齐样本 <60 时这些字段为 None，不影响既有字段。"""
+    ctx = ctx if isinstance(ctx, dict) else {}
     ret_map = ctx.get("returns")
     if not ret_map:
         return None
@@ -691,7 +865,44 @@ def portfolio_diagnostics(cfg, products, ctx):
     nav = (1 + combo_ret).cumprod()
     max_dd = float((nav / nav.cummax() - 1).min())
     var95 = float(combo_ret.quantile(0.05))
-    return {"vol": annual_vol, "max_dd": max_dd, "var95": var95}
+    out = {"vol": annual_vol, "max_dd": max_dd, "var95": var95,
+           "excess_ann": None, "alpha": None, "beta": None, "ir": None}
+
+    # ---- 5.1 基准对比：复合基准日收益（inner join 对齐、按权重求和） ----
+    bench_map = ctx.get("bench_returns")
+    bench_w = ctx.get("bench_weights")
+    if isinstance(bench_map, dict) and isinstance(bench_w, dict):
+        bnames = [b for b in bench_w if b in bench_map]
+        if bnames:
+            bcommon = None
+            for b in bnames:
+                bs = bench_map[b]
+                if bs is None or len(bs) == 0:
+                    bcommon = None
+                    break
+                bcommon = bs.index if bcommon is None else bcommon.intersection(bs.index)
+            if bcommon is not None:
+                bcommon = bcommon.intersection(common)
+                if len(bcommon) >= 60:
+                    bw = pd.Series({b: float(bench_w.get(b, 0) or 0) for b in bnames})
+                    if bw.sum() > 0:
+                        bw = bw / bw.sum()
+                        bdf = pd.DataFrame({b: bench_map[b].loc[bcommon] for b in bnames})
+                        bench_ret = bdf.dot(bw)
+                        pr = combo_ret.loc[bcommon]
+                        excess = pr - bench_ret
+                        excess_ann = float(excess.mean() * 250)
+                        te = float(excess.std() * math.sqrt(250))
+                        if excess_ann == excess_ann:      # NaN 防护
+                            out["excess_ann"] = excess_ann
+                            out["alpha"] = excess_ann
+                        varb = float(bench_ret.var())
+                        if varb == varb and varb > 0:
+                            covpb = float(((pr - pr.mean()) * (bench_ret - bench_ret.mean())).mean())
+                            out["beta"] = covpb / varb
+                        if te == te and te > 0 and out["excess_ann"] is not None:
+                            out["ir"] = out["excess_ann"] / te
+    return out
 
 
 def portfolio_simulator(ret_map, weights_after, total):
@@ -716,3 +927,53 @@ def portfolio_simulator(ret_map, weights_after, total):
     max_dd = float((nav / nav.cummax() - 1).min())
     var95 = float(combo_ret.quantile(0.05))
     return {"vol": annual_vol, "max_dd": max_dd, "var95": var95}
+
+
+def validate_config(cfg):
+    """静态结构校验（5.6）：返回问题字符串列表，空列表 = 无问题。不联网、不调用采集。"""
+    probs = []
+    if not isinstance(cfg, dict):
+        return ["cfg 必须是 dict（当前类型 %s）" % type(cfg).__name__]
+    for k in ("holdings", "products"):
+        v = cfg.get(k)
+        if v is not None and not isinstance(v, list):
+            probs.append("cfg.%s 必须是 list" % k)
+    t = cfg.get("target")
+    if not isinstance(t, dict):
+        probs.append("cfg.target 必须是 dict（且需包含 equity）")
+    elif not isinstance(t.get("equity"), dict):
+        probs.append("cfg.target.equity 缺失或不是 dict（必须存在）")
+    rules_ = cfg.get("rules")
+    if rules_ is not None and not isinstance(rules_, dict):
+        probs.append("cfg.rules 必须是 dict")
+    else:
+        tp = (rules_ or {}).get("take_profit")
+        if tp is not None:
+            if not isinstance(tp, dict):
+                probs.append("cfg.rules.take_profit 必须是 dict")
+            else:
+                vr = tp.get("vol_ref")
+                if vr is not None and not isinstance(vr, dict):
+                    probs.append("rules.take_profit.vol_ref 必须是 dict")
+                tg = tp.get("tier_gap")
+                if tg is not None and (not isinstance(tg, list) or len(tg) < 2
+                                       or not all(isinstance(x, (int, float)) and x >= 0 for x in tg)):
+                    probs.append("rules.take_profit.tier_gap 必须是 ≥2 个非负数的 list")
+                for kk in ("fee_margin", "dd_factor", "min_hold_days"):
+                    v = tp.get(kk)
+                    if v is not None and not isinstance(v, (int, float)):
+                        probs.append("rules.take_profit.%s 必须是数值" % kk)
+    # shares/cost 数值合法（holdings/products 条目）
+    for sec in ("holdings", "products"):
+        for item in (cfg.get(sec) or []):
+            if not isinstance(item, dict):
+                probs.append("cfg.%s 元素必须是 dict" % sec)
+                continue
+            tag = str(item.get("code") or item.get("fund_code") or item.get("name") or "?")
+            for kk in ("shares", "cost"):
+                v = item.get(kk)
+                if v is None:
+                    continue
+                if not isinstance(v, (int, float)) or v != v or v < 0:
+                    probs.append("cfg.%s[%s].%s 不合法（须为非负数值）" % (sec, tag, kk))
+    return probs

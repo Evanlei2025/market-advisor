@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """StateStore —— 状态与记忆层（state-memory 职责域）。
-双轨制：本地自动写 state.json；云端（GitHub Actions）无跨日磁盘，
-状态与在途资金以 config（Secret）人工维护为准，本模块只读兼容。
-提供：在途资金表、最近指令/执行状态、冷却期判定、留痕表读写、知识库读取。
+双轨制：本地自动写 state.json（最近指令/执行状态、冷却期）；云端（GitHub Actions）
+无跨日磁盘，状态与在途资金以 config（Secret）人工维护为准，本模块只读兼容。
+跨日持久通道：knowledge_base/ 下 JSON（云端 Actions commit 回写）——
+  traces.json（止盈留痕）、recommendations.json（推荐日志）、
+  state_history.json（每日状态快照：在途资金/冷却期/上次调仓日期等，最近 60 条）。
+提供：在途资金表、最近指令/执行状态、冷却期判定、留痕表读写、知识库读取、
+     影子模式进度统计、状态快照读写、昨日推荐/近期信号回顾。
 """
 import json
 import os
@@ -136,6 +140,37 @@ def in_cooldown(cfg, state=None):
         return False
 
 
+# ---------------- 通用小工具 ----------------
+def _is_iso_date(s):
+    """是否为合法 ISO 日期（YYYY-MM-DD）"""
+    try:
+        date.fromisoformat(str(s)[:10])
+        return True
+    except Exception:
+        return False
+
+
+def _norm_date_str(v):
+    """把 last_rebalance_date 等字段的 string / dict 形式归一为 YYYY-MM-DD；
+    dict 兼容 date / date_str / last_rebalance_date / value 键的 dict 形式；
+    无法解析返回 None。"""
+    if isinstance(v, dict):
+        for k in ('date', 'date_str', 'last_rebalance_date', 'value'):
+            if v.get(k):
+                v = v[k]
+                break
+        else:
+            return None
+    if not v:
+        return None
+    s = str(v).strip()[:10]
+    try:
+        return date.fromisoformat(s).isoformat()
+    except Exception:
+        return None
+
+
+
 # ---------------- 留痕表（止盈信号/算法偏差） ----------------
 TRACES_PATH = os.path.join(KB_DIR, "traces.json")
 
@@ -175,6 +210,38 @@ def recent_tp_actions(traces=None, days=5):
     return out
 
 
+def get_recent_signals(days=5):
+    """最近 days 个交易日内的信号回顾（3.3 补充）：读 traces.json，
+    窗口按 trading_days_between(signal_date, 今日) <= days 判定（含今日，忽略未来日期）；
+    按 (code, action, signal_date) 去重；返回简化条目 [code/action/signal_date]，
+    按 signal_date 倒序；窗口内无记录 → []。"""
+    traces = kb_read_traces()
+    today = date.today()
+    seen = set()
+    out = []
+    for t in reversed(traces):
+        if not isinstance(t, dict):
+            continue
+        code = str(t.get('code', '')).strip()
+        act = str(t.get('action', '')).strip()
+        sd = str(t.get('signal_date', ''))[:10]
+        if not code or not act or not _is_iso_date(sd):
+            continue
+        d = date.fromisoformat(sd)
+        if d > today:
+            continue
+        if trading_days_between(d, today) > days:
+            continue
+        key = (code, act, sd)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({'code': code, 'action': act, 'signal_date': sd})
+    out.sort(key=lambda x: x['signal_date'], reverse=True)
+    return out
+
+
+
 def record_trace(entry):
     """留痕七字段：{T_eff, T_pre, v_bench, 因子值, 信号日, 执行日, 费后净收益}
     写入 knowledge_base/traces.json（追加）。"""
@@ -189,7 +256,50 @@ def record_trace(entry):
         log_state(f"[WARN] 留痕失败: {e}")
 
 
+def shadow_stats(cfg):
+    """影子模式进度统计（3.5）。
+    起始日优先级：cfg.rules.take_profit.shadow_mode_started_date
+      → cfg.shadow_mode_started_date → traces.json 最早 trace 的 signal_date → None。
+    返回 {start: YYYY-MM-DD 或 None, days: 自然日数（start 到今日，None 时 0）,
+          signals: traces 中 signal_date >= start 的条数（字符串比较，start None 时 0）,
+          products: 涉及产品 code 去重数}；无数据/异常 → 全默认。"""
+    start = (cfg.get('rules', {}).get('take_profit', {}).get('shadow_mode_started_date')
+             or cfg.get('shadow_mode_started_date') or '')
+    start = _norm_date_str(start)
+    traces = kb_read_traces()
+    if not start:
+        dates = []
+        for t in traces:
+            if isinstance(t, dict):
+                sd = str(t.get('signal_date', ''))[:10]
+                if _is_iso_date(sd):
+                    dates.append(sd)
+        start = min(dates) if dates else None
+    if not start:
+        return {'start': None, 'days': 0, 'signals': 0, 'products': 0}
+    try:
+        days = max(0, (date.today() - date.fromisoformat(start)).days)
+    except Exception:
+        days = 0
+    n = 0
+    codes = set()
+    for t in traces:
+        if not isinstance(t, dict):
+            continue
+        sd = str(t.get('signal_date', ''))[:10]
+        if _is_iso_date(sd) and sd >= start:
+            n += 1
+            code = str(t.get('code', '')).strip()
+            if code:
+                codes.add(code)
+    return {'start': start, 'days': days, 'signals': n, 'products': len(codes)}
+
+shadow_mode_stats = shadow_stats  # 兼容升级指令书 3.5 中 shadow_mode_stats() 的等价别名
+
+
 # ---------------- 推荐日志（近一月推荐次数：用户"次数暗示"需求） ----------------
+
+
 REC_PATH = os.path.join(KB_DIR, "recommendations.json")
 
 
@@ -241,6 +351,25 @@ def count_recent_recommendations(name, days=30):
 
 
 # ---------------- 知识库读取 ----------------
+def get_yesterday_recommendations():
+    """昨日推荐回顾（3.3）：读 knowledge_base/recommendations.json，
+    返回所有条目中严格早于今日的最大 date（上一个日期）的条目列表；
+    文件缺失/损坏/无历史条目/全空 → []。注意：同 date 多条都返回，不含今日。"""
+    recs = kb_read_recommendations()
+    today = date.today().isoformat()
+    prev = ''
+    for r in recs:
+        if not isinstance(r, dict):
+            continue
+        d = str(r.get('date', ''))[:10]
+        if _is_iso_date(d) and d < today and d > prev:
+            prev = d
+    if not prev:
+        return []
+    return [r for r in recs if isinstance(r, dict) and str(r.get('date', ''))[:10] == prev]
+
+
+
 def kb_product(code):
     """读取 knowledge_base/products/<code>.md 摘要（前 N 行概述 + 近况节）。
     返回字符串或空。"""
@@ -270,3 +399,66 @@ def kb_watchlist():
     except Exception:
         pass
     return {}
+
+
+# ---------------- 状态快照（state_history.json，云端跨日持久通道） ----------------
+STATE_HISTORY_PATH = os.path.join(KB_DIR, 'state_history.json')
+STATE_HISTORY_KEEP = 60
+
+
+def kb_read_state_history():
+    """读取每日状态快照历史（按 date 升序）；缺失/损坏返回 []"""
+    try:
+        if os.path.exists(STATE_HISTORY_PATH):
+            with open(STATE_HISTORY_PATH, encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def write_state_snapshot(entry):
+    """每次运行结束时调用一次（3.4）：把当日状态快照写入
+    knowledge_base/state_history.json（云端 Actions commit 回写 → 跨日持久）。
+    entry 为 dict（含 date/orders/target_alloc/pending_cash/total_mv/tp_signals 等键，
+    由调用方组装；本方法不校验具体键，只做通用存储）。
+    数组按 date 升序追加；同 date 已存在则原位覆盖（保持最新）；
+    只保留最近 60 条（超出截断最旧）。文件损坏/不存在 → 重建空数组。
+    写失败不抛异常，仅记日志。"""
+    try:
+        os.makedirs(KB_DIR, exist_ok=True)
+        data = kb_read_state_history()
+        dkey = str(entry.get('date', '')) if isinstance(entry, dict) else ''
+        if isinstance(entry, dict) and dkey:
+            for idx, e in enumerate(data):
+                if isinstance(e, dict) and str(e.get('date', '')) == dkey:
+                    data[idx] = entry
+                    break
+            else:
+                data.append(entry)
+        else:
+            data.append(entry)
+        data.sort(key=lambda e: (str(e.get('date', '')) if isinstance(e, dict) else ''))
+        data = data[-STATE_HISTORY_KEEP:]
+        with open(STATE_HISTORY_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        log_state('[SNAP] 状态快照已写: ' + (dkey or '<no-date>'))
+    except Exception as e:
+        log_state('[WARN] 状态快照写入失败: ' + str(e))
+
+
+def get_last_rebalance_date(cfg):
+    """上次调仓日期（YYYY-MM-DD 字符串或 None；3.4 冷却期跨日持久辅助）。
+    兼容 string / dict 两种配置形式；优先级：
+      config.portfolio.last_rebalance_date → 本地 state.json
+      → 云端快照 knowledge_base/state_history.json（最近一次快照，git 回写跨日持久）。
+    不改动 in_cooldown 既有逻辑，仅在本方法内做兼容读取。"""
+    raw = (cfg.get('portfolio', {}).get('last_rebalance_date')
+           or load_state().get('last_rebalance_date') or '')
+    if not raw:
+        for e in reversed(kb_read_state_history()):
+            if isinstance(e, dict) and e.get('last_rebalance_date'):
+                raw = e['last_rebalance_date']
+                break
+    return _norm_date_str(raw)
