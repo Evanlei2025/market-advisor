@@ -1,0 +1,46 @@
+{
+  "quarter": "2026Q2",
+  "stocks": [
+    {
+      "stock_name": "新易盛",
+      "weight": 9.5
+    },
+    {
+      "stock_name": "南亚新材",
+      "weight": 8.8
+    },
+    {
+      "stock_name": "源杰科技",
+      "weight": 8.6
+    },
+    {
+      "stock_name": "三环集团",
+      "weight": 7.9
+    },
+    {
+      "stock_name": "德福科技",
+      "weight": 7.9
+    },
+    {
+      "stock_name": "鼎泰高科",
+      "weight": 7.8
+    },
+    {
+      "stock_name": "大族数控",
+      "weight": 7.1
+    },
+    {
+      "stock_name": "风华高科",
+      "weight": 6.8
+    },
+    {
+      "stock_name": "博迁新材",
+      "weight": 4.3
+    },
+    {
+      "stock_name": "华正新材",
+      "weight": 3.6
+    }
+  ],
+  "_comment": "基金季报前十大重仓股缓存：quarter 形如 2026Q2；stocks 为 [{stock_name, weight}]，weight 为占净值比例(%)，缺失为 null"
+}

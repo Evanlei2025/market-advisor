@@ -194,7 +194,7 @@ class CRO:
                 out.append(f"[{rid}] {o.get('reason', '')}｜人话：{p}")
         return out
 
-    # ---------- 今日指令摘要 ----------
+    # ---------- 今日一句话触发链（B1：不含 headline，由 main.py 置顶组装） ----------
     def _chain_line(self, rid, text):
         return f"[{rid}] {text}"
 
@@ -210,10 +210,11 @@ class CRO:
         out += ["→ " + it for it in items[1:]]
         return out
 
-    def get_summary(self):
-        """完整摘要块（含标题），由 main.py 置顶插入"""
+    def get_today_block(self):
+        """「今日一句话」触发链块（B1：不含 headline 与板块标题，由 main.py 置顶组装）。
+        返回以 '> ' 开头的引用行列表；无可附加内容（IDLE）返回 []。"""
         s = self.state()
-        out = ["## 今日指令摘要", f"> {self.get_headline()}"]
+        out = []
         if s == "STORM":
             out.append(">")
             out.append("> **触发链**：" + "\n> ".join(self._storm_chain()))
@@ -239,4 +240,4 @@ class CRO:
             if p:
                 out.append(">")
                 out.append(f"> 人话：{p}")
-        return "\n".join(out)
+        return out

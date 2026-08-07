@@ -1,0 +1,46 @@
+{
+  "quarter": "2026Q2",
+  "stocks": [
+    {
+      "stock_name": "中科飞测",
+      "weight": 9.7
+    },
+    {
+      "stock_name": "中微公司",
+      "weight": 8.8
+    },
+    {
+      "stock_name": "富创精密",
+      "weight": 8.7
+    },
+    {
+      "stock_name": "北方华创",
+      "weight": 7.0
+    },
+    {
+      "stock_name": "芯源微",
+      "weight": 6.9
+    },
+    {
+      "stock_name": "华虹宏力",
+      "weight": 6.7
+    },
+    {
+      "stock_name": "华海清科",
+      "weight": 6.7
+    },
+    {
+      "stock_name": "华峰测控",
+      "weight": 6.6
+    },
+    {
+      "stock_name": "拓荆科技",
+      "weight": 5.8
+    },
+    {
+      "stock_name": "长川科技",
+      "weight": 3.0
+    }
+  ],
+  "_comment": "基金季报前十大重仓股缓存：quarter 形如 2026Q2；stocks 为 [{stock_name, weight}]，weight 为占净值比例(%)，缺失为 null"
+}

@@ -90,6 +90,10 @@
     },
     "cooldown": {
       "default_days": 5
+    },
+    "diagnostics": {
+      "min_stat_mv": 50000,
+      "_comment": "组合统计代表性阈值（单位元，默认 50000）：市值低于该值的持仓不纳入代表性统计（组合诊断 vol/回撤/VaR 代表性过滤）。"
     }
   },
   "settlement": {

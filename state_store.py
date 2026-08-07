@@ -145,6 +145,17 @@ def in_cooldown(cfg, state=None, client=None):
         return False
 
 
+def min_stat_mv(cfg):
+    '组合统计代表性阈值（单位元，默认 50000）：cfg.rules.diagnostics.min_stat_mv；缺失/异常 → 50000。'
+    try:
+        v = cfg.get('rules', {}).get('diagnostics', {}).get('min_stat_mv')
+        if v is None:
+            return 50000.0
+        return float(v)
+    except Exception:
+        return 50000.0
+
+
 # ---------------- 通用小工具 ----------------
 def _is_iso_date(s):
     """是否为合法 ISO 日期（YYYY-MM-DD）"""
@@ -262,6 +273,37 @@ def get_recent_signals(days=5, client=None):
     return out
 
 
+def tp_streak_days(code, client=None):
+    '止盈信号持续天数（V3，用户反馈“006195 止盈信号触发第几天了？”——去重隐藏了重复信号，报告显示“持续中（第 N 天）”）。口径：读 traces.json，过滤 _client_of 且 code 匹配且 signal_date 为 ISO 日期且 <= 今天，取最近一个信号日；N = trading_days_between(最近信号日, 今天) + 1；最近信号日距今 > 10 个交易日 → 0（已过期不算“持续中”）；无记录/异常 → 0。'
+    try:
+        code = str(code or '').strip()
+        if not code:
+            return 0
+        today = date.today()
+        best = None
+        for t in kb_read_traces():
+            if not isinstance(t, dict) or not _client_of(t, client):
+                continue
+            if str(t.get('code', '')).strip() != code:
+                continue
+            sd = str(t.get('signal_date', ''))[:10]
+            if not _is_iso_date(sd):
+                continue
+            d = date.fromisoformat(sd)
+            if d > today:
+                continue
+            if best is None or d > best:
+                best = d
+        if best is None:
+            return 0
+        n = trading_days_between(best, today)
+        if n > 10:
+            return 0
+        return n + 1
+    except Exception:
+        return 0
+
+
 def record_trace(entry, client=None):
     '留痕七字段：{T_eff, T_pre, v_bench, 因子值, 信号日, 执行日, 费后净收益} 写入 knowledge_base/traces.json（追加）。新条目带 client 字段（None 时按 Evan_Lei）。'
     try:
@@ -275,6 +317,41 @@ def record_trace(entry, client=None):
         log_state('[TRACE] 已记录: ' + str(entry.get('code', '?')) + ' T_eff=' + str(entry.get('T_eff')))
     except Exception as e:
         log_state('[WARN] 留痕失败: ' + str(e))
+
+
+# ---------------- 执行回执历史（feedback，state.json 内） ----------------
+
+
+def record_feedback(client, date, status, note=""):
+    '追加一条执行回执到 state.json 的 feedback 数组（条目 {client, date, status, note}；client 用 _norm_client 归一，None → Evan_Lei）。沿用 load_state()/save_state()，只新增 feedback key，不破坏既有结构；state.json 缺失时自动创建。'
+    try:
+        st = load_state()
+        fb = st.get('feedback')
+        if not isinstance(fb, list):
+            fb = []
+        fb.append({'client': _norm_client({'client': client}),
+                   'date': str(date),
+                   'status': str(status),
+                   'note': str(note)})
+        st['feedback'] = fb
+        save_state(st)
+        log_state('[FEEDBACK] 已记录: ' + str(status) + ' @' + str(date))
+    except Exception as e:
+        log_state('[WARN] 回执写入失败: ' + str(e))
+
+
+def get_feedback(client=None, limit=1):
+    '返回该客户最近 limit 条执行回执（按 date 倒序；为隔离必须按客户过滤，client=None → 默认 DEFAULT_CLIENT）；feedback 缺失/损坏 → []。返回 list[dict]。'
+    try:
+        fb = load_state().get('feedback')
+        if not isinstance(fb, list):
+            return []
+        cl = _norm_client({'client': client})
+        out = [f for f in fb if isinstance(f, dict) and _norm_client(f) == cl]
+        out.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+        return out[:limit]
+    except Exception:
+        return []
 
 
 def shadow_stats(cfg, client=None):
@@ -429,7 +506,7 @@ def kb_read_state_history():
 
 
 def write_state_snapshot(entry, client=None):
-    '每次运行结束时调用一次（3.4）：把当日状态快照写入 knowledge_base/state_history.json（云端 Actions commit 回写 → 跨日持久）。entry 为 dict，本方法不校验具体键，只做通用存储；新条目自动带 client 字段（None 时按 Evan_Lei；旧条目无 client 字段同样按 Evan_Lei 处理）。数组按 date 升序追加；同 date 且同 client 已存在则原位覆盖；只保留最近 60 条。写失败不抛异常，仅记日志。'
+    '每次运行结束时调用一次（3.4）：把当日状态快照写入 knowledge_base/state_history.json（云端 Actions commit 回写 → 跨日持久）。entry 为 dict，本方法不校验具体键，只做通用存储；可选字段 storm_active（bool）、eq_target（float）：调用方传什么存什么（不强制），供 was_storm_yesterday() 昨日风暴对照读取；新条目自动带 client 字段（None 时按 Evan_Lei；旧条目无 client 字段同样按 Evan_Lei 处理）。数组按 date 升序追加；同 date 且同 client 已存在则原位覆盖；只保留最近 60 条。写失败不抛异常，仅记日志。'
     try:
         os.makedirs(KB_DIR, exist_ok=True)
         data = kb_read_state_history()
@@ -473,3 +550,27 @@ def get_last_rebalance_date(cfg, client=None):
                 raw = e['last_rebalance_date']
                 break
     return _norm_date_str(raw)
+
+
+# ---------------- 昨日风暴对照（V3） ----------------
+
+
+def was_storm_yesterday(client=None):
+    '昨日风暴对照（V3）：读 state_history.json，找该客户日期 < 今天的最近一条快照，返回其 storm_active（True/False）；缺失或非 bool → None（未知）。client=None 不过滤（旧条目按 Evan_Lei）。'
+    try:
+        today = date.today().isoformat()
+        best = None
+        for e in kb_read_state_history():
+            if not isinstance(e, dict) or not _client_of(e, client):
+                continue
+            d = str(e.get('date', ''))[:10]
+            if not _is_iso_date(d) or d >= today:
+                continue
+            if best is None or d > best:
+                best = e
+        if best is None:
+            return None
+        v = best.get('storm_active')
+        return v if isinstance(v, bool) else None
+    except Exception:
+        return None

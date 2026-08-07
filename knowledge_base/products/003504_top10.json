@@ -1,0 +1,46 @@
+{
+  "quarter": "2026Q2",
+  "stocks": [
+    {
+      "stock_name": "中际旭创",
+      "weight": 3.3
+    },
+    {
+      "stock_name": "新易盛",
+      "weight": 3.0
+    },
+    {
+      "stock_name": "寒武纪",
+      "weight": 1.6
+    },
+    {
+      "stock_name": "源杰科技",
+      "weight": 1.4
+    },
+    {
+      "stock_name": "华虹宏力",
+      "weight": 1.3
+    },
+    {
+      "stock_name": "生益科技",
+      "weight": 1.2
+    },
+    {
+      "stock_name": "工业富联",
+      "weight": 1.2
+    },
+    {
+      "stock_name": "东山精密",
+      "weight": 1.0
+    },
+    {
+      "stock_name": "中芯国际",
+      "weight": 0.9
+    },
+    {
+      "stock_name": "阳光电源",
+      "weight": 0.6
+    }
+  ],
+  "_comment": "基金季报前十大重仓股缓存：quarter 形如 2026Q2；stocks 为 [{stock_name, weight}]，weight 为占净值比例(%)，缺失为 null"
+}
