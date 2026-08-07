@@ -123,13 +123,17 @@ def build_user_prompt(ctx):
     def fmt_sig(items):
         return "\n".join(f"- {k}: {v}" for k, v in items.items()) if items else "- 无"
 
+    # 多客户支持：客户显示名仅在存在时注入，缺失时输出与单客户版本完全一致
+    client_display = (ctx.get("client_display") or "").strip()
+    owner_label = f"客户 {client_display} 关注产品" if client_display else "客户关注产品"
+
     product_lines = []
     for p in ctx.get("products", []):
         if p.get("unavailable"):
             product_lines.append(f"- {p['code']} {p.get('name', '')}: 非公募产品，自动数据不可用，平台:{p.get('platform','')}，人工备注:{p.get('notes','')}")
         else:
             product_lines.append(
-                f"- {p['code']} {p.get('name', '')}（{p.get('type', '')}类，编号对应客户关注产品）"
+                f"- {p['code']} {p.get('name', '')}（{p.get('type', '')}类，编号对应{owner_label}）"
                 f" 最新净值:{p.get('nav_latest', '无')} 区间收益:{p.get('returns', '无')}"
                 f" 近1年最大回撤:{p.get('max_dd', '无')} 同类排名:{p.get('ranking', '无')}"
                 f" 规模:{p.get('scale', '无')} 成立:{p.get('inception', '无')} 基金经理:{p.get('manager', '无')}"
@@ -138,7 +142,14 @@ def build_user_prompt(ctx):
                 f" 平台:{p.get('platform', '无')} 人工备注:{p.get('notes', '无')}"
             )
 
-    parts = [
+    parts = []
+    if client_display:
+        parts.append(
+            "## 客户\n"
+            f"- 本报告解读对象为客户 {client_display} 的组合，以下数据、指令与解读均以该客户为准。"
+        )
+        parts.append("")
+    parts.extend([
         "## 当日数据快照（静态程序采集，权威数值，解读必须逐字引用，禁止出现快照之外的任何数字）",
         f"- 指数: {fmt_sig(ctx.get('indexes', {}))}",
         f"- 估值(PE十年分位): {fmt_sig(ctx.get('valuation', {}))}",
@@ -181,7 +192,7 @@ def build_user_prompt(ctx):
         f"- {', '.join(ctx.get('rule_ids', [])) or '无'}",
         "",
         "请按系统指令输出解读 JSON。",
-    ]
+    ])
     return "\n".join(parts)
 
 
@@ -384,7 +395,7 @@ def insert_insights(report, insights, product_names=None, ctx=None):
                 log_audit(a)
             try:
                 import state_store
-                n30 = state_store.count_recent_recommendations(name, days=30)
+                n30 = state_store.count_recent_recommendations(name, days=30, client=ctx.get("client_id"))
             except Exception:
                 n30 = 0
             badge = f"（近一月第 {n30 + 1} 次推荐）" if n30 >= 1 else ""

@@ -122,12 +122,17 @@ def cooldown_days(cfg, code=None):
                cd.get("default_days", 5) or 5)
 
 
-def in_cooldown(cfg, state=None):
-    """距上次调仓是否在冷却期。优先级：config.portfolio.last_rebalance_date（云端人工维护）
-    > 本地 state.json。两者皆无 → 放行。"""
+def in_cooldown(cfg, state=None, client=None):
+    '距上次调仓是否在冷却期。优先级：config.portfolio.last_rebalance_date（云端人工维护）> state.json 的 clients.<client>.last_rebalance_date（客户维度）> 顶层 last_rebalance_date（旧单客户形态）。两者皆无 → 放行。'
     st = state or load_state()
-    last = (cfg.get("portfolio", {}).get("last_rebalance_date")
-            or st.get("last_rebalance_date") or "")
+    last = cfg.get('portfolio', {}).get('last_rebalance_date') or ''
+    if not last:
+        cl_raw = ''
+        if client and isinstance(st, dict) and isinstance(st.get('clients'), dict):
+            cl = st['clients'].get(client)
+            if isinstance(cl, dict):
+                cl_raw = cl.get('last_rebalance_date') or ''
+        last = cl_raw or (st.get('last_rebalance_date') or '' if isinstance(st, dict) else '')
     if not last:
         return False
     try:
@@ -171,6 +176,24 @@ def _norm_date_str(v):
 
 
 
+DEFAULT_CLIENT = 'Evan_Lei'
+
+
+def _norm_client(entry):
+    '条目所属客户：无 client 字段的旧条目一律视为 Evan_Lei（读取兼容，不改写历史文件）。'
+    if not isinstance(entry, dict):
+        return DEFAULT_CLIENT
+    return str(entry.get('client') or DEFAULT_CLIENT)
+
+
+def _client_of(entry, client):
+    'client=None → 不过滤；否则按 _norm_client 归一化后匹配。'
+    if client is None:
+        return True
+    return _norm_client(entry) == client
+
+
+
 # ---------------- 留痕表（止盈信号/算法偏差） ----------------
 TRACES_PATH = os.path.join(KB_DIR, "traces.json")
 
@@ -187,16 +210,17 @@ def kb_read_traces():
     return []
 
 
-def recent_tp_actions(traces=None, days=5):
-    """最近 days 交易日内每产品最近一次止盈 action（排除今天）。
-    返回 {code: action}；用于同档位信号去重（V型回落二次穿越防护）。"""
+def recent_tp_actions(traces=None, days=5, client=None):
+    '最近 days 交易日内每产品最近一次止盈 action（排除今天）。返回 {code: action}；用于同档位信号去重（V型回落二次穿越防护）。client=None 不过滤；旧条目（无 client 字段）按 Evan_Lei 计。'
     traces = traces if traces is not None else kb_read_traces()
     out = {}
     today = date.today()
     for t in reversed(traces):
-        code = str(t.get("code", ""))
-        act = str(t.get("action", ""))
-        sd = str(t.get("signal_date", ""))[:10]
+        if not isinstance(t, dict) or not _client_of(t, client):
+            continue
+        code = str(t.get('code', ''))
+        act = str(t.get('action', ''))
+        sd = str(t.get('signal_date', ''))[:10]
         if not code or not act or not sd:
             continue
         try:
@@ -210,17 +234,14 @@ def recent_tp_actions(traces=None, days=5):
     return out
 
 
-def get_recent_signals(days=5):
-    """最近 days 个交易日内的信号回顾（3.3 补充）：读 traces.json，
-    窗口按 trading_days_between(signal_date, 今日) <= days 判定（含今日，忽略未来日期）；
-    按 (code, action, signal_date) 去重；返回简化条目 [code/action/signal_date]，
-    按 signal_date 倒序；窗口内无记录 → []。"""
+def get_recent_signals(days=5, client=None):
+    '最近 days 个交易日内的信号回顾（3.3 补充）：读 traces.json，窗口按 trading_days_between(signal_date, 今日) <= days 判定（含今日，忽略未来日期）；按 (code, action, signal_date) 去重；返回简化条目 [code/action/signal_date]，按 signal_date 倒序；窗口内无记录 → []。client=None 不过滤；旧条目按 Evan_Lei。'
     traces = kb_read_traces()
     today = date.today()
     seen = set()
     out = []
     for t in reversed(traces):
-        if not isinstance(t, dict):
+        if not isinstance(t, dict) or not _client_of(t, client):
             continue
         code = str(t.get('code', '')).strip()
         act = str(t.get('action', '')).strip()
@@ -241,39 +262,33 @@ def get_recent_signals(days=5):
     return out
 
 
-
-def record_trace(entry):
-    """留痕七字段：{T_eff, T_pre, v_bench, 因子值, 信号日, 执行日, 费后净收益}
-    写入 knowledge_base/traces.json（追加）。"""
+def record_trace(entry, client=None):
+    '留痕七字段：{T_eff, T_pre, v_bench, 因子值, 信号日, 执行日, 费后净收益} 写入 knowledge_base/traces.json（追加）。新条目带 client 字段（None 时按 Evan_Lei）。'
     try:
         os.makedirs(KB_DIR, exist_ok=True)
         data = kb_read_traces()
+        if isinstance(entry, dict):
+            entry['client'] = client or DEFAULT_CLIENT
         data.append(entry)
-        with open(TRACES_PATH, "w", encoding="utf-8") as f:
+        with open(TRACES_PATH, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        log_state(f"[TRACE] 已记录: {entry.get('code','?')} T_eff={entry.get('T_eff')}")
+        log_state('[TRACE] 已记录: ' + str(entry.get('code', '?')) + ' T_eff=' + str(entry.get('T_eff')))
     except Exception as e:
-        log_state(f"[WARN] 留痕失败: {e}")
+        log_state('[WARN] 留痕失败: ' + str(e))
 
 
-def shadow_stats(cfg):
-    """影子模式进度统计（3.5）。
-    起始日优先级：cfg.rules.take_profit.shadow_mode_started_date
-      → cfg.shadow_mode_started_date → traces.json 最早 trace 的 signal_date → None。
-    返回 {start: YYYY-MM-DD 或 None, days: 自然日数（start 到今日，None 时 0）,
-          signals: traces 中 signal_date >= start 的条数（字符串比较，start None 时 0）,
-          products: 涉及产品 code 去重数}；无数据/异常 → 全默认。"""
+def shadow_stats(cfg, client=None):
+    '影子模式进度统计（3.5）。起始日优先级：cfg.rules.take_profit.shadow_mode_started_date → cfg.shadow_mode_started_date → traces.json 最早 trace 的 signal_date → None。返回 {start, days, signals, products}；signals/products 按 client 过滤（client=None 不过滤；旧条目按 Evan_Lei）。'
     start = (cfg.get('rules', {}).get('take_profit', {}).get('shadow_mode_started_date')
              or cfg.get('shadow_mode_started_date') or '')
     start = _norm_date_str(start)
-    traces = kb_read_traces()
+    traces = [t for t in kb_read_traces() if isinstance(t, dict) and _client_of(t, client)]
     if not start:
         dates = []
         for t in traces:
-            if isinstance(t, dict):
-                sd = str(t.get('signal_date', ''))[:10]
-                if _is_iso_date(sd):
-                    dates.append(sd)
+            sd = str(t.get('signal_date', ''))[:10]
+            if _is_iso_date(sd):
+                dates.append(sd)
         start = min(dates) if dates else None
     if not start:
         return {'start': None, 'days': 0, 'signals': 0, 'products': 0}
@@ -284,8 +299,6 @@ def shadow_stats(cfg):
     n = 0
     codes = set()
     for t in traces:
-        if not isinstance(t, dict):
-            continue
         sd = str(t.get('signal_date', ''))[:10]
         if _is_iso_date(sd) and sd >= start:
             n += 1
@@ -293,6 +306,7 @@ def shadow_stats(cfg):
             if code:
                 codes.add(code)
     return {'start': start, 'days': days, 'signals': n, 'products': len(codes)}
+
 
 shadow_mode_stats = shadow_stats  # 兼容升级指令书 3.5 中 shadow_mode_stats() 的等价别名
 
@@ -315,9 +329,8 @@ def kb_read_recommendations():
     return []
 
 
-def kb_append_recommendations(entries):
-    """追加当日推荐（自动加 date），写回 recommendations.json。
-    云端每次运行后由 Actions commit 回写，实现跨日持久。"""
+def kb_append_recommendations(entries, client=None):
+    '追加当日推荐（自动加 date 与 client 字段），写回 recommendations.json。云端每次运行后由 Actions commit 回写，实现跨日持久。'
     if not entries:
         return
     try:
@@ -325,49 +338,46 @@ def kb_append_recommendations(entries):
         data = kb_read_recommendations()
         today = date.today().isoformat()
         for e in entries:
-            name = str(e.get("name") or e.get("industry") or "").strip()
+            name = str(e.get('name') or e.get('industry') or '').strip()
             if not name:
                 continue
-            data.append({"date": today, "name": name,
-                         "type": str(e.get("type", "") or "").strip(),
-                         "reason": str(e.get("reason", ""))[:120]})
-        with open(REC_PATH, "w", encoding="utf-8") as f:
+            data.append({'date': today, 'name': name,
+                         'type': str(e.get('type', '') or '').strip(),
+                         'reason': str(e.get('reason', ''))[:120],
+                         'client': client or DEFAULT_CLIENT})
+        with open(REC_PATH, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        log_state(f"[REC] 推荐日志追加 {len(entries)} 条")
+        log_state('[REC] 推荐日志追加 ' + str(len(entries)) + ' 条')
     except Exception as e:
-        log_state(f"[WARN] 推荐日志写入失败: {e}")
+        log_state('[WARN] 推荐日志写入失败: ' + str(e))
 
 
-def count_recent_recommendations(name, days=30):
-    """近 days 天内某名称被推荐次数"""
+def count_recent_recommendations(name, days=30, client=None):
+    """近 days 天内某名称被推荐次数（client 非 None 时仅统计该客户）"""
     if not name:
         return 0
     cutoff = (date.today() - __import__("datetime").timedelta(days=days)).isoformat()
     n = 0
     for r in kb_read_recommendations():
         if str(r.get("name", "")).strip() == name and str(r.get("date", ""))[:10] >= cutoff:
-            n += 1
+            if client is None or _client_of(r, client):
+                n += 1
     return n
 
 
 # ---------------- 知识库读取 ----------------
-def get_yesterday_recommendations():
-    """昨日推荐回顾（3.3）：读 knowledge_base/recommendations.json，
-    返回所有条目中严格早于今日的最大 date（上一个日期）的条目列表；
-    文件缺失/损坏/无历史条目/全空 → []。注意：同 date 多条都返回，不含今日。"""
-    recs = kb_read_recommendations()
+def get_yesterday_recommendations(client=None):
+    '昨日推荐回顾（3.3）：读 knowledge_base/recommendations.json，返回严格早于今日的最大 date（上一个日期）的条目列表；文件缺失/损坏/无历史条目/全空 → []。同 date 多条都返回，不含今日。按 client 过滤（client=None 不过滤；旧条目无 client 字段按 Evan_Lei）。'
+    recs = [r for r in kb_read_recommendations() if isinstance(r, dict) and _client_of(r, client)]
     today = date.today().isoformat()
     prev = ''
     for r in recs:
-        if not isinstance(r, dict):
-            continue
         d = str(r.get('date', ''))[:10]
         if _is_iso_date(d) and d < today and d > prev:
             prev = d
     if not prev:
         return []
-    return [r for r in recs if isinstance(r, dict) and str(r.get('date', ''))[:10] == prev]
-
+    return [r for r in recs if str(r.get('date', ''))[:10] == prev]
 
 
 def kb_product(code):
@@ -418,28 +428,26 @@ def kb_read_state_history():
     return []
 
 
-def write_state_snapshot(entry):
-    """每次运行结束时调用一次（3.4）：把当日状态快照写入
-    knowledge_base/state_history.json（云端 Actions commit 回写 → 跨日持久）。
-    entry 为 dict（含 date/orders/target_alloc/pending_cash/total_mv/tp_signals 等键，
-    由调用方组装；本方法不校验具体键，只做通用存储）。
-    数组按 date 升序追加；同 date 已存在则原位覆盖（保持最新）；
-    只保留最近 60 条（超出截断最旧）。文件损坏/不存在 → 重建空数组。
-    写失败不抛异常，仅记日志。"""
+def write_state_snapshot(entry, client=None):
+    '每次运行结束时调用一次（3.4）：把当日状态快照写入 knowledge_base/state_history.json（云端 Actions commit 回写 → 跨日持久）。entry 为 dict，本方法不校验具体键，只做通用存储；新条目自动带 client 字段（None 时按 Evan_Lei；旧条目无 client 字段同样按 Evan_Lei 处理）。数组按 date 升序追加；同 date 且同 client 已存在则原位覆盖；只保留最近 60 条。写失败不抛异常，仅记日志。'
     try:
         os.makedirs(KB_DIR, exist_ok=True)
         data = kb_read_state_history()
+        if isinstance(entry, dict):
+            entry['client'] = client or DEFAULT_CLIENT
         dkey = str(entry.get('date', '')) if isinstance(entry, dict) else ''
+        ckey = _norm_client(entry)
         if isinstance(entry, dict) and dkey:
             for idx, e in enumerate(data):
-                if isinstance(e, dict) and str(e.get('date', '')) == dkey:
+                if isinstance(e, dict) and str(e.get('date', '')) == dkey and _norm_client(e) == ckey:
                     data[idx] = entry
                     break
             else:
                 data.append(entry)
         else:
             data.append(entry)
-        data.sort(key=lambda e: (str(e.get('date', '')) if isinstance(e, dict) else ''))
+        data.sort(key=lambda e: (str(e.get('date', '')) if isinstance(e, dict) else '',
+                                 _norm_client(e) if isinstance(e, dict) else ''))
         data = data[-STATE_HISTORY_KEEP:]
         with open(STATE_HISTORY_PATH, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -448,17 +456,20 @@ def write_state_snapshot(entry):
         log_state('[WARN] 状态快照写入失败: ' + str(e))
 
 
-def get_last_rebalance_date(cfg):
-    """上次调仓日期（YYYY-MM-DD 字符串或 None；3.4 冷却期跨日持久辅助）。
-    兼容 string / dict 两种配置形式；优先级：
-      config.portfolio.last_rebalance_date → 本地 state.json
-      → 云端快照 knowledge_base/state_history.json（最近一次快照，git 回写跨日持久）。
-    不改动 in_cooldown 既有逻辑，仅在本方法内做兼容读取。"""
-    raw = (cfg.get('portfolio', {}).get('last_rebalance_date')
-           or load_state().get('last_rebalance_date') or '')
+def get_last_rebalance_date(cfg, client=None):
+    '上次调仓日期（YYYY-MM-DD 字符串或 None；3.4 冷却期跨日持久辅助）。兼容 string / dict 两种配置形式；优先级：config.portfolio.last_rebalance_date → 本地 state.json（clients.<client>.last_rebalance_date 客户维度优先，顶层 last_rebalance_date 回退）→ 云端快照 knowledge_base/state_history.json（按 client 过滤；旧条目按 Evan_Lei；client=None 不过滤）。不改动 in_cooldown 既有逻辑，仅在本方法内做兼容读取。'
+    raw = cfg.get('portfolio', {}).get('last_rebalance_date') or ''
+    if not raw:
+        st = load_state()
+        cl_raw = ''
+        if client and isinstance(st.get('clients'), dict):
+            cl = st['clients'].get(client)
+            if isinstance(cl, dict):
+                cl_raw = cl.get('last_rebalance_date') or ''
+        raw = cl_raw or st.get('last_rebalance_date') or ''
     if not raw:
         for e in reversed(kb_read_state_history()):
-            if isinstance(e, dict) and e.get('last_rebalance_date'):
+            if isinstance(e, dict) and e.get('last_rebalance_date') and _client_of(e, client):
                 raw = e['last_rebalance_date']
                 break
     return _norm_date_str(raw)

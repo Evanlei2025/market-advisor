@@ -1,10 +1,19 @@
-# 项目进度记录（2026-08-06 更新）
+# 项目进度记录（2026-08-07 更新）
 
 ## 项目：每日投顾报告 → 客户定制推送服务（market_advisor）
 
-**架构一句话：规则引擎权威、AI 只做解读。** 每天 15:35 自动采集市场数据，rules.py 输出确定性信号（权益目标阶梯、市场预警、动态止盈 V2.2、订单簿），narrative.py 转大白话（CRO 叙事），llm.py 调 DeepSeek 解读但被 AdvisorGatekeeper 三层硬过滤拦截越权内容，main.py 编排全链路并推送微信（Server酱）。只出建议不自动交易。
+**架构一句话：规则引擎权威、AI 只做解读。** 每天 15:35 自动采集市场数据，rules.py 输出确定性信号（权益目标阶梯、市场预警、动态止盈 V2.2、订单簿），narrative.py 转大白话（CRO 叙事），llm.py 调 DeepSeek 解读但被 AdvisorGatekeeper 三层硬过滤拦截越权内容，main.py 编排全链路并推送微信（Server酱）。只出建议不自动交易。**多客户模式**：每客户独立组合/指令/报告/推送（详见下方）。
 
 ## 已完成 ✅
+
+### 多客户改造（2026-08-07）
+- **config 结构**：全局段（push/rules 出厂默认/settlement/news_watch）+ `clients` 字典（Evan_Lei 原数据迁入含调优参数 tier_gap；Harley_Lei/NULL_Xue 空壳客户，不继承 Evan 调优，走出厂默认）
+- **get_clients()/deep_merge()**：客户子配置 = 全局段+客户段深度合并（list 客户覆盖）；旧形态配置向后兼容
+- **主流程重构**：市场数据（指数/估值/EP/债市/宏观/黄金/新闻）一次采集共享，`run_client()` 逐客户执行产品分析（净值同 code 缓存）→ 指令 → 叙事 → 哨兵 → AI 解读（空客户跳过）→ 报告 → 推送 → 快照；单客户异常不拖垮全链路
+- **状态客户化**：traces/recommendations/state_history 条目带 client 字段，函数支持 client 过滤，旧条目归并 Evan_Lei；推荐计数按客户隔离；冷却期/在途经客户子配置天然隔离；快照按 (date, client) 去重
+- **输出与推送**：`reports/<客户ID>/report_日期.md/.html + latest.html`；根 index.html 客户入口页；每客户一条推送（标题带客户名，链接指向各自 latest.html）
+- **修复**：空客户 eq_target NameError 隐患（B1 发现）、_client_of 布尔比较 bug、llm.py 客户名注入（向后兼容验证）
+- **测试**：test_clients.py 22 项全过（三客户解析/merge 语义/旧配置兼容/状态隔离）；test_tp.py 15/15 回归；端到端三客户三报告+索引页生成成功
 
 ### 架构与核心（V2.2，2026-08-06）
 - **六子智能体**（`.opencode/agents/`）：data-fetcher / rule-engineer / narrative-writer / llm-engineer / news-sentinel / state-memory，并行审查+分工实现
@@ -25,27 +34,31 @@
 
 ### 云托管（2026-08-05 上线）
 - GitHub Actions daily-report：cron '35 7 * * 1-5' UTC（北京15:35），注入 Secret：ADVISOR_CONFIG / DEEPSEEK_API_KEY / SERVERCHAN_KEY（失败通知）
-- 报告存档 artifacts 90天；knowledge_base commit 回写；Pages 部署（Evanlei2025.github.io/market-advisor/latest.html）
+- 报告存档 artifacts 90天；knowledge_base commit 回写；Pages 部署（Evanlei2025.github.io/market-advisor/ → index.html 客户入口，各客户 latest.html 独立页面）
 - Server酱推送实测成功（code=0，微信已收到）
 - 本地计划任务已删除（防重复推送）
 
 ### 测试
 - test_tp.py 止盈算法 15 场景（动态档位基准）：单档/跳档/边界/等值/高位不重复/极端亏损/首日缺失/NaN防护/回撤保护/纯债豁免/高估值压缩/去重窗口/转亏回撤/高波动档距——全过
-- 端到端（--push-off + AI）：预警、止盈信号、人话版、叙事、基准对比、状态板块全部正常
+- test_clients.py 多客户 22 项：get_clients 三客户解析/客户子配置合并（Evan 调优保留、新客户走默认）/旧配置兼容/deep_merge 不改原对象/状态按客户隔离（旧条目归 Evan）/快照同日共存/推荐计数隔离
+- 端到端（--push-off + AI）：三客户三份报告 + 客户索引页 + 空客户降级报告全部正常
 
 ## 当前状态 🔭
 
 - **止盈影子模式 6 个月观察期**（2026-08-06 起，仅记录不执行），报告中显示进度
-- 云端 cron 每日 15:35 运行，traces/recommendations/state_history 跨日积累
+- 云端 cron 每日 15:35 运行，traces/recommendations/state_history 跨日积累（按客户隔离）
+- 客户：Evan_Lei（006195/014846/003504 关注池+真实持仓）、Harley_Lei、NULL_Xue（空壳，产品信息待用户提供）
 
 ## 待办（下一步）🔜
 
-- [ ] 云端新版首跑验证：微信推送 + Pages 网页图表显示正常（含 state_history.json 首次回写）
+- [ ] Harley_Lei / NULL_Xue 产品信息到位后：填 products/holdings，按各自风险偏好设 target（出厂默认起步，非 Evan 调优值）
+- [ ] 云端多客户版首跑验证：微信三条推送 + Pages 客户入口页（index.html）三链接正常
 - [ ] 用户确认 GitHub Secret SERVERCHAN_KEY 已添加（Actions 失败通知用）
 - [ ] C 迭代观察：AI 行业推荐板块（宁缺毋滥纪律生效中，连续未输出）
 - [ ] D 迭代：多平台结算参数校准（等用户提供且慢/支付宝实测数据）
 - [ ] 知识库建档扩展：重点关注产品持续更新档案
 - [ ] 影子模式期满后：信号命中率统计、止盈算法转正式
+- [ ] news_alert「按持仓占比设警报门槛」：README 已承诺但代码未实现（文档漂移），实现时分子/分母用客户级市值
 
 ## 关键技术点备忘
 
@@ -54,5 +67,6 @@
 - 规则 ID 体系（Gatekeeper 白名单同源）：TP-YIELD-1/2/3、TP-DD、LAD-CSI300-80/90/95、LAD-CSI500-75、LAD-CYB-90、MIN-MERGE、EP-CAP-10（动态阈值）、STORM-5、REB-EQ、REB-BOND、BUY-NEW；止损 SL-* 已全部删除
 - 推送限制：Server酱约3800字节，build_compact 按核心板块优先裁剪；免费额度 5 条/天
 - 云端无跨日磁盘，跨日持久唯一通道 = knowledge_base git 回写（traces/recommendations/state_history）
-- 用户持仓：006195 国金量化多因子股票A（233.55份）、014846 博时恒乐债券A（1407.30份）、003504 已清仓仅观察、现金0；在途：006195 赎回 116.78份 8-10 到账约¥351；平台=招商证券
+- 用户持仓（Evan_Lei）：006195 国金量化多因子股票A（233.55份）、014846 博时恒乐债券A（1407.30份）、003504 已清仓仅观察、现金0；在途：006195 赎回 116.78份 8-10 到账约¥351；平台=招商证券
+- 多客户纪律：新客户参数用出厂默认（非 Evan 调优值，如 tier_gap 动态算法接管）；Harley_Lei/NULL_Xue 目标仓位待各自产品信息到位后设定
 - 用户操作习惯：出入金手动执行；config 每次交易后需更新（Secret ADVISOR_CONFIG 为云端事实源）

@@ -3,6 +3,7 @@
 数据采集 -> 规则决策 -> 完整版报告 + 精简版推送 + HTML 网页
 """
 import argparse
+import copy
 import json
 import os
 import re
@@ -70,6 +71,42 @@ def load_config():
     log("[WARN] 未找到配置，使用默认")
     return {"target": {"equity": {"base": 0.4, "band": 0.05}, "cash": {"base": 0.1, "band": 0.05}},
             "holdings": [], "products": []}
+
+
+def deep_merge(base, override):
+    """深度递归合并配置：子 dict 递归合并，list/标量直接覆盖（override 优先）。
+    返回新 dict，不改动 base/override 原对象。"""
+    if isinstance(base, dict) and isinstance(override, dict):
+        out = copy.deepcopy(base)
+        for k, v in override.items():
+            if k in out:
+                out[k] = deep_merge(out[k], v)
+            else:
+                out[k] = copy.deepcopy(v)
+        return out
+    return copy.deepcopy(override)
+
+
+def get_clients(cfg):
+    """多客户配置视图：cfg 含非空 clients dict → 逐客户生成
+    {'id', 'display_name', 'cfg': deep_merge(全局段, 客户段)}，保持 clients 键插入顺序；
+    旧形态配置（无 clients）→ 单客户 default 兼容视图。
+    sub_cfg 与旧单客户 cfg 形态一致（push/rules/settlement/news_watch/target/
+    portfolio/products/holdings/transactions），另附 client_display 供叙事/LLM 使用。"""
+    clients = cfg.get('clients') if isinstance(cfg, dict) else None
+    if not isinstance(clients, dict) or not clients:
+        base_cfg = dict(cfg) if isinstance(cfg, dict) else {}
+        base_cfg['client_display'] = '客户组合'
+        return [{'id': 'default', 'display_name': '客户组合', 'cfg': base_cfg}]
+    base = {k: v for k, v in cfg.items() if k != 'clients'}
+    out = []
+    for cid, csec in clients.items():
+        csec = csec if isinstance(csec, dict) else {}
+        disp = csec.get('display_name') or cid
+        sub = deep_merge(base, csec)
+        sub['client_display'] = disp
+        out.append({'id': cid, 'display_name': disp, 'cfg': sub})
+    return out
 
 
 def _pick_cols(df, *candidates):
@@ -472,8 +509,9 @@ MACRO_NOTES = {
 }
 
 
-def analyze_product(fetcher, p, cfg_ref, bench_pctile_map):
-    """单个产品分析：返回 (report_lines, ctx_dict)。失败不阻塞。"""
+def analyze_product(fetcher, p, cfg_ref, bench_pctile_map, nav_cache=None):
+    """单个产品分析：返回 (report_lines, ctx_dict)。失败不阻塞。
+    nav_cache：跨客户共享净值缓存 {fund_code: DataFrame}，同一产品只拉一次。"""
     code = p.get("code", "?")
     name = p.get("name") or ""
     ptype = p.get("type", "other")
@@ -485,7 +523,13 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map):
         return ([f"- {code} {name}: 银行理财/券商产品，自动数据不可用（需人工维护）"],
                 {**ctx, "unavailable": True})
 
-    nav = fetch_section(lambda: fetcher.fund_nav_history(fcode), f"净值{fcode}")
+    nav = None
+    if nav_cache is not None:
+        nav = nav_cache.get(fcode)
+    if nav is None:
+        nav = fetch_section(lambda: fetcher.fund_nav_history(fcode), f"净值{fcode}")
+        if nav_cache is not None and nav is not None:
+            nav_cache[fcode] = nav
     achievement = fetch_section(lambda: fetcher.fund_achievement(fcode), f"业绩{fcode}") or []
     profile = fetch_section(lambda: fetcher.fund_profile(fcode), f"资料{fcode}") or {}
 
@@ -1036,6 +1080,91 @@ def _main():
             news_ctx.append({"title": title, "content": content})
     ctx["news"] = news_ctx
 
+    # ---------- 6.5 多客户循环：市场数据共享，以下按客户独立执行 ----------
+    mkt_lines = lines
+    mkt_ctx = dict(ctx)
+    clients = get_clients(cfg)
+    if not clients:
+        log("[WARN] 配置中无任何客户，跳过")
+        return
+    nav_cache = {}
+    page_links = []
+    for cl in clients:
+        try:
+            report_full, title = run_client(
+                fetcher, cl, today, mkt_lines, mkt_ctx,
+                bench_ret_series, temp_lines, stale_indexes, news_ctx,
+                nav_cache, args.push_off)
+            page_links.append({"id": cl["id"], "name": cl["display_name"], "title": title})
+            log(f"[CLIENT] {cl['id']} 报告完成")
+        except Exception as e:
+            log(f"[ERROR] 客户 {cl['id']} 报告失败: {str(e)[:200]}")
+            log(traceback.format_exc())
+    try:
+        write_client_index(page_links)
+    except Exception as e:
+        log(f"[WARN] 客户索引页生成失败: {str(e)[:80]}")
+
+
+def page_url_for(client_id):
+    return f"https://Evanlei2025.github.io/market-advisor/{client_id}/latest.html"
+
+
+def write_client_index(page_links):
+    """reports/index.html：客户报告入口页（GitHub Pages 首页，每客户最新报告链接）"""
+    md = ["# 投顾报告 · 客户入口", ""]
+    for p in page_links:
+        md.append(f"- [{p['name']}]({p['id']}/latest.html) — {p['title']}")
+    md.append("")
+    md.append("*各客户报告每日自动生成，点击客户名查看。*")
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    page = html_render.render("\n".join(md), "投顾报告客户入口")
+    with open(os.path.join(REPORT_DIR, "index.html"), "w", encoding="utf-8") as f:
+        f.write(page)
+
+
+def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
+               temp_lines, stale_indexes, news_ctx, nav_cache, push_off):
+    """单个客户完整流程（市场数据已共享）：产品分析 → 组合指令 → 叙事 →
+    新闻哨兵 → AI 解读 → 报告输出 → 推送 → 状态快照。"""
+    cfg = cl["cfg"]
+    client_id = cl["id"]
+    client_disp = cl["display_name"]
+    lines = list(mkt_lines)
+    L = lines.append
+    ctx = dict(mkt_ctx)
+    ctx["client_id"] = client_id
+    ctx["client_display"] = client_disp
+    bench_weights = None
+    eq_target = None
+    storm_active = False
+    storm_reasons = []
+    ep_lock = False
+    cooldown_active = False
+    orders = []
+    target_alloc = {}
+    summary_lines = []
+    tp_actions = {}
+    tp_ctx_map = {}
+    cro = None
+    alerts = None
+    recap_line = None
+    product_ctxs = []
+    mv_map = {}
+    returns_map = {}
+    weights_map = {}
+    total_mv = 0
+    cash_mv = 0
+    ep_thr = 0.10
+
+    if hasattr(rules, "validate_config"):
+        try:
+            vc = rules.validate_config(cfg)
+            if vc:
+                log(f"[WARN] 客户 {client_id} 配置校验: {vc}")
+        except Exception as e:
+            log(f"[WARN] 客户 {client_id} 配置校验失败: {str(e)[:120]}")
+
     # ---------- 6. 理财产品分析（关注池） ----------
     products = cfg.get("products", [])
     product_ctxs = []
@@ -1052,7 +1181,7 @@ def _main():
         L("")
         L(f"## 理财产品跟踪")
         for p in products:
-            plines, pctx = analyze_product(fetcher, p, cfg, per_code_bench)
+            plines, pctx = analyze_product(fetcher, p, cfg, per_code_bench, nav_cache)
             for ln in plines:
                 L(ln)
             product_ctxs.append(pctx)
@@ -1092,12 +1221,13 @@ def _main():
     if total_mv <= 0:
         L(f"- 持仓市值为 0，暂无法生成指令")
     else:
-        L(f"- 客户组合（总市值 ¥{total_mv:,.0f}，跟投份数 {cfg.get('portfolio', {}).get('follow_units', 1)}）")
+        pname = cfg.get("portfolio", {}).get("name") or client_disp
+        L(f"- {pname}（总市值 ¥{total_mv:,.0f}，跟投份数 {cfg.get('portfolio', {}).get('follow_units', 1)}）")
         eq_target, rule_triggers = rules.equity_target(cfg, ctx)
         storm_active, storm_reasons = rules.storm_lock(eq_target, rule_triggers)
         ep_thr = rules.ep_threshold(ctx) if hasattr(rules, "ep_threshold") else 0.10
         ep_lock = (not storm_active) and (ctx.get("ep_premium_pctile") is not None) and (ctx["ep_premium_pctile"] < ep_thr)
-        cooldown_active = state_store.in_cooldown(cfg)
+        cooldown_active = state_store.in_cooldown(cfg, client=client_id)
 
         pctx_map = {p.get("code", ""): p for p in product_ctxs}
         nav_map = {}
@@ -1122,7 +1252,7 @@ def _main():
 
         # ---- 动态止盈 V2.2：信号判定（影子模式只记录） ----
         # 近5交易日同档位去重（V型回落后二次穿越的防护；trace 仍全量记录供评估）
-        _last_tp = state_store.recent_tp_actions()
+        _last_tp = state_store.recent_tp_actions(client=client_id)
 
         tp_ctx_map = {}
         repeat_signals = {}
@@ -1160,7 +1290,7 @@ def _main():
                     repeat_signals[code] = {"name": pc.get("name", code), "action": act}
                 tp_ctx_map[code] = {"action": act, "detail": detail, "rid": rid,
                                     "trace": trace, "repeat": is_repeat}
-                state_store.record_trace(trace) if trace else None
+                state_store.record_trace(trace, client=client_id) if trace else None
 
         # ---- 订单簿（市值口径 + 关注池 + 余额约束 + 冷却/在途） ----
         cash_mv = sum(float(h.get("amount", 0)) for h in holdings if h.get("type") == "cash")
@@ -1183,8 +1313,8 @@ def _main():
             cooldown_active=cooldown_active, today=today)
 
         # ---- 昨日信号回顾（学习闭环：昨日推荐 + 昨日止盈信号；无数据不显示板块） ----
-        y_recs = state_store.get_yesterday_recommendations()
-        y_sigs = [s for s in state_store.get_recent_signals(days=2)
+        y_recs = state_store.get_yesterday_recommendations(client=client_id)
+        y_sigs = [s for s in state_store.get_recent_signals(days=2, client=client_id)
                   if str(s.get("signal_date", ""))[:10] < today]
         recap_line = None
         try:
@@ -1226,7 +1356,7 @@ def _main():
                 L(f"- {code}：建议落袋约 {a['amount']:,.0f} 元")
                 L(f"  原因：{a['reason']}")
             L("*止盈目标线算法处于 6 个月观察期，信号仅供跟踪与评估，暂不生成执行指令。*")
-        sstats = state_store.shadow_stats(cfg)
+        sstats = state_store.shadow_stats(cfg, client=client_id)
         if sstats.get("start"):
             L(f"- 影子模式已运行 {sstats['days']} 天（起始 {sstats['start']}，6个月观察期），累计记录 {sstats['signals']} 次信号，涉及 {sstats['products']} 个产品")
         if repeat_signals:
@@ -1413,10 +1543,12 @@ def _main():
     L(f"*买卖请手动执行；指令基于 T-1 日净值估算，实际成交偏差通常在 ±0.3% 以内，以 App 确认值为准。*")
 
     report_full = "\n".join(lines)
-    title = f"每日投顾报告 {today}"
 
     # ---------- 10. AI 解读层 ----------
-    ctx["equity_band"] = "、".join(f"{x*100:.0f}%" for x in rules.target_band(cfg, eq_target)) + f"（以规则目标 {eq_target*100:.0f}% 为中心）"
+    if eq_target is not None:
+        ctx["equity_band"] = "、".join(f"{x*100:.0f}%" for x in rules.target_band(cfg, eq_target)) + f"（以规则目标 {eq_target*100:.0f}% 为中心）"
+    else:
+        ctx["equity_band"] = "未计算"
     ctx["equity_target"] = f"{eq_target*100:.0f}%（规则引擎基准）" if total_mv > 0 else "未计算"
     kb_parts = []
     for p in products:
@@ -1430,7 +1562,8 @@ def _main():
     else:
         ctx["tp_signal_text"] = "今日无止盈信号"
 
-    insights, usage_info = llm.generate_insights(ctx)
+    insights, usage_info = (llm.generate_insights(ctx) if (total_mv > 0 and products)
+                            else (None, "跳过（无持仓或关注池）"))
     advice_value = None
     if insights:
         pnames = {p.get("code", ""): p.get("name", "") for p in products}
@@ -1444,7 +1577,7 @@ def _main():
             if nm and rsn:
                 rec_entries.append({"name": nm, "type": "industry" if r.get("industry") else "product",
                                     "reason": rsn})
-        state_store.kb_append_recommendations(rec_entries)
+        state_store.kb_append_recommendations(rec_entries, client=client_id)
         adv = insights.get("equity_target_advice") or {}
         raw = adv.get("value")
         if raw is not None:
@@ -1518,15 +1651,17 @@ def _main():
             "pending_cash": state_store.pending_cash(cfg),
             "total_mv": total_mv,
             "tp_signals": [{"code": c, "action": v.get("action")} for c, v in tp_ctx_map.items()],
-        })
+        }, client=client_id)
     except Exception as e:
         log(f"[WARN] 状态快照写入失败: {str(e)[:80]}")
 
-    # ---------- 13. 输出：完整版 md + HTML + 精简版推送 ----------
-    os.makedirs(REPORT_DIR, exist_ok=True)
-    md_path = os.path.join(REPORT_DIR, f"report_{today}.md")
-    html_path = os.path.join(REPORT_DIR, f"report_{today}.html")
-    latest_html = os.path.join(REPORT_DIR, "latest.html")
+    # ---------- 13. 输出：完整版 md + HTML + 精简版推送（每客户独立目录） ----------
+    title = f"{client_disp} 每日投顾报告 {today}"
+    cdir = os.path.join(REPORT_DIR, client_id)
+    os.makedirs(cdir, exist_ok=True)
+    md_path = os.path.join(cdir, f"report_{today}.md")
+    html_path = os.path.join(cdir, f"report_{today}.html")
+    latest_html = os.path.join(cdir, "latest.html")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# {title}\n\n" + report_full)
     try:
@@ -1542,16 +1677,18 @@ def _main():
         f.write(page)
     log(f"完整版报告已生成: {md_path} / {html_path}")
 
-    if not args.push_off:
+    if not push_off:
         channel = cfg.get("push", {}).get("channel", "none")
         blocks = split_blocks(report_full)
-        compact = build_compact(blocks, PAGE_URL, today)
+        compact = build_compact(blocks, page_url_for(client_id), today)
         if channel == "wecom":
             push_wecom(cfg["push"]["wecom_webhook"], title, compact)
         elif channel == "serverchan":
             push_serverchan(cfg["push"]["serverchan_key"], title, compact)
         else:
             log("push.channel = none，未推送（本地报告已保存）")
+
+    return report_full, title
 
 
 def redemption_note(code, buy_date, fees_str):

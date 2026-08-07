@@ -2,30 +2,34 @@
 
 规则化投顾日报：每天收盘后采集市场数据，**规则引擎输出确定性信号，AI 只做受约束解读**，推送到微信。**只出建议不自动交易；出入金均由你手动执行。**
 
+**多客户模式**：一个实例服务多个客户。`config.json` 全局段（push/rules 出厂默认/settlement/news_watch）+ `clients` 字典（每客户：target/products/holdings/transactions/组合名）。每客户独立执行：产品分析→指令→叙事→AI 解读→报告→推送；市场数据一次采集共享。当前客户：`Evan_Lei`（真实持仓）、`Harley_Lei`、`NULL_Xue`（空壳待填产品）。
+
 ## 架构
 
 ```
-config.json (持仓/关注池/规则/结算参数)
-  → DataFetcher (49项数据源: 腾讯/乐咕/上金所/天天基金/雪球/财联社/央行/上交所等)
-  → analyze_product (每产品: 净值/收益/回撤/排名/费率/权益暴露/HHI)
-  → rules.py (权益目标阶梯 + 市场预警 + 动态止盈V2.2 + 订单簿 + 组合诊断)
-  → narrative.CRO (大白话因果链，不调用LLM)
-  → news_alert (财联社电报实体匹配，一级/二级警报)
-  → llm.generate_insights → AdvisorGatekeeper 三层硬过滤 → 插入各板块
-  → 报告组装 (MD + HTML含Chart.js图表 + 精简版)
-  → Server酱 → 微信
+config.json (全局段 + clients 多客户配置)
+  → get_clients()/deep_merge() (客户子配置 = 全局段 + 客户覆盖)
+  → DataFetcher (49项数据源: 腾讯/乐咕/上金所/天天基金/雪球/财联社/央行/上交所等) [市场数据共享一次]
+  → run_client() 逐客户:
+      analyze_product (每产品: 净值/收益/回撤/排名/费率/权益暴露/HHI, 净值同code缓存)
+      rules.py (权益目标阶梯 + 市场预警 + 动态止盈V2.2 + 订单簿 + 组合诊断)
+      narrative.CRO (大白话因果链，不调用LLM)
+      news_alert (财联社电报实体匹配，一级/二级警报)
+      llm.generate_insights → AdvisorGatekeeper 三层硬过滤 → 插入各板块
+      → 报告组装 (MD + HTML含Chart.js图表 + 精简版)
+      → Server酱 → 微信 (每客户一条, 标题带客户名)
 ```
 
 ## 模块
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | 主编排：数据采集→规则决策→报告组装→推送（含降级兜底/状态板块/图表数据） |
+| `main.py` | 主编排：市场采集（共享）→ get_clients/run_client 逐客户（产品分析→指令→AI→报告→推送）→ 客户索引页 |
 | `rules.py` | 确定性策略引擎：权益目标/市场预警/动态止盈V2.2/订单簿/组合诊断/评分排序 |
-| `llm.py` | DeepSeek 解读 + AdvisorGatekeeper（黑名单正则+数字审计+规则ID白名单，>30%回退CRO） |
+| `llm.py` | DeepSeek 解读 + AdvisorGatekeeper（黑名单正则+数字审计+规则ID白名单，>30%回退CRO）；客户名注入 |
 | `narrative.py` | CRO 叙事：规则信号→人话因果链 + 规则原理锚点 + 术语速查 |
-| `news_alert.py` | 财联社电报实体匹配警报（按持仓占比设门槛） |
-| `state_store.py` | 状态与记忆：在途资金/冷却期/止盈留痕/推荐日志/状态快照/知识库 |
+| `news_alert.py` | 财联社电报实体匹配警报（实体表按客户 products 构建，天然客户隔离） |
+| `state_store.py` | 状态与记忆：在途资金/冷却期/止盈留痕/推荐日志/状态快照（全部按 client 隔离，旧数据归 Evan_Lei） |
 | `html_render.py` | Markdown→HTML（表格+Chart.js三图表，无第三方依赖） |
 | `style.py` | Markdown 美化（中英数字间加空格） |
 | `diagnose_position.py` | 基金仓位穿透诊断工具（手工运行） |
@@ -34,10 +38,10 @@ config.json (持仓/关注池/规则/结算参数)
 
 1. push 到 GitHub（公开仓库，敏感数据只放 Secret）
 2. Settings → Secrets and variables → Actions 添加：
-   - `ADVISOR_CONFIG`：完整 `config.json` 内容（参考 `config.example.json`）
+   - `ADVISOR_CONFIG`：完整 `config.json` 内容（含 `clients` 多客户结构，参考 `config.example.json`）
    - `DEEPSEEK_API_KEY`：DeepSeek key
    - `SERVERCHAN_KEY`：Server酱 SendKey（可选，仅失败通知用）
-3. 每个交易日北京时间 15:35 自动运行；报告存档 artifacts 90 天；`knowledge_base/` 自动 commit 回写（跨日持久）；Pages 部署完整版网页（`https://Evanlei2025.github.io/market-advisor/latest.html`）
+3. 每个交易日北京时间 15:35 自动运行（一次运行遍历全部客户）；报告存档 artifacts 90 天；`knowledge_base/` 自动 commit 回写（跨日持久，按客户隔离）；Pages 部署：`https://Evanlei2025.github.io/market-advisor/`（客户入口 index.html → 各客户 `/<客户ID>/latest.html`）
 
 ## 本地部署
 
@@ -48,9 +52,10 @@ config.json (持仓/关注池/规则/结算参数)
 ## 常用命令
 
 ```powershell
-python main.py --push-off      # 试运行，只生成报告不推送
-python main.py                 # 正常（按 config 推送）
+python main.py --push-off      # 试运行，只生成报告不推送（全部客户）
+python main.py                 # 正常（按 config 推送，每客户一条）
 python test_tp.py              # 止盈算法 15 场景单测
+python test_clients.py         # 多客户 22 项单测（配置解析/状态隔离）
 ```
 
 ## 决策规则（透明公开，rules.py 权威，AI 无权修改）
@@ -79,8 +84,9 @@ python test_tp.py              # 止盈算法 15 场景单测
 ## 测试与质量
 
 - `test_tp.py`：止盈算法 15 场景单测（动态档位基准），改动 rules.py 后必须全过
+- `test_clients.py`：多客户 22 项单测（get_clients 解析/客户子配置合并/状态按客户隔离）
 - 数据新鲜度校验：净值/行情滞后自动标注+头部警告；核心数据严重缺失红字提示
-- 顶层异常兜底：任何崩溃输出降级报告并推送
+- 顶层异常兜底：任何崩溃输出降级报告并推送；单客户异常不拖垮其他客户
 - 报告末尾「系统运行状态」板块：49 项数据源成败一览
 
 ## 免责声明
