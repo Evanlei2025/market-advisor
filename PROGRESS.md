@@ -59,7 +59,7 @@
 - **止盈影子模式 6 个月观察期**（2026-08-06 起，仅记录不执行），报告中显示进度
 - 云端 cron 每日 15:35 运行，traces/recommendations/state_history 跨日积累（按客户隔离）
 - 客户：Evan_Lei（006195/014846/003504 关注池+真实持仓）；Harley_Lei（关注 001480/675123，已配 SendKey）；NULL_Xue（关注 025687/006195/016347/022720）；Echo_Wang（空壳，已配 SendKey）——持仓/平台未知，长期留空
-- AI 综述/方向倾向板块：本地无 DEEPSEEK_API_KEY 时跳过（fallback 复读 CRO 叙事文本），云端 Actions 带 key 正常生成——云端首跑时验证 summary 板块与方向倾向句
+- AI 综述/方向倾向板块：云端实测通过（2026-08-07，核对清单 1-4 符合）；本地无 DEEPSEEK_API_KEY 时跳过（fallback 复读 CRO 叙事文本）
 
 ## 技术治理（2026-08-07）
 
@@ -86,7 +86,7 @@
 
 ## 待办（下一步）🔜
 
-- [ ] 云端四客户版首跑验证（更新 Secret ADVISOR_CONFIG 后触发）：微信四条推送（Harley/Echo 独立接收）+ Pages 客户入口页四链接 + **AI 综述板块与方向倾向句实测**（验证清单：summary ≥2 快照数值因果链/跨市场/新闻传导/方向倾向三选一 ≤180 字；产品解读风险/背离/传导 ≥2 项；不复读 CRO；compact ≤3700 字节）
+- [x] 云端四客户版首跑验证（2026-08-07 完成）：微信四条推送（Harley/Echo 独立接收）+ Pages 客户入口页四链接 + **AI 综述板块与方向倾向句实测通过**（核对清单 1-4 全部符合：summary 含 ≥2 快照数值因果链/跨市场/新闻传导/方向倾向三选一 ≤180 字；产品解读风险/背离/传导 ≥2 项；不复读 CRO；compact ≤3700 字节；状态标签 ✅/👀/⚠️ 与"止盈持续中（第 N 天）"正常）
 - [ ] 技术治理记账项修复（见上"测试发现待修点"）
 - [ ] 向 NULL_Xue 发送 docs/CLIENT_ONBOARDING.md，索要 Server酱 SendKey；收到后配 per-client push 并更新 Secret
 - [ ] 客户持仓信息到位后：填 holdings，按各自风险偏好设 target（出厂默认起步，非 Evan 调优值）
