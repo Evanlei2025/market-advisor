@@ -213,6 +213,10 @@
     },
     "Harley_Lei": {
       "display_name": "Harley_Lei",
+      "push": {
+        "channel": "serverchan",
+        "serverchan_key": "SCT_客户Key占位请替换"
+      },
       "portfolio": {
         "name": "Harley_Lei 客户组合",
         "follow_units": 1
@@ -307,10 +311,14 @@
       ],
       "transactions": []
     },
-    "Jing_Wang": {
-      "display_name": "Jing_Wang",
+    "Echo_Wang": {
+      "display_name": "Echo_Wang",
+      "push": {
+        "channel": "serverchan",
+        "serverchan_key": "SCT_客户Key占位请替换"
+      },
       "portfolio": {
-        "name": "Jing_Wang 客户组合",
+        "name": "Echo_Wang 客户组合",
         "follow_units": 1
       },
       "products": [],

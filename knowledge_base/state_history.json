@@ -29,6 +29,15 @@
   {
     "date": "2026-08-07",
     "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "client": "Echo_Wang"
+  },
+  {
+    "date": "2026-08-07",
+    "orders": [],
     "target_alloc": {
       "equity": 0.05,
       "bond": 0.85,

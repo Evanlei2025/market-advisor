@@ -26,7 +26,7 @@ def run():
     cfg = json.load(open("config.json", encoding="utf-8"))
     clients = main.get_clients(cfg)
     check("四客户解析", len(clients) == 4, f"n={len(clients)}")
-    check("客户ID顺序", [c["id"] for c in clients] == ["Evan_Lei", "Harley_Lei", "NULL_Xue", "Jing_Wang"],
+    check("客户ID顺序", [c["id"] for c in clients] == ["Evan_Lei", "Harley_Lei", "NULL_Xue", "Echo_Wang"],
           str([c["id"] for c in clients]))
 
     evan = clients[0]["cfg"]
@@ -57,9 +57,12 @@ def run():
           and nx["holdings"][0]["type"] == "cash")
 
     jing = clients[3]["cfg"]
-    check("Jing_Wang 空壳", len(jing.get("products", [])) == 0
+    check("Echo_Wang 空壳", len(jing.get("products", [])) == 0
           and len(jing.get("holdings", [])) == 1
           and jing["holdings"][0]["type"] == "cash")
+    check("Echo_Wang 客户级push覆盖", jing.get("push", {}).get("serverchan_key", "").startswith("SCT392325"))
+    check("Harley 客户级push覆盖", harley.get("push", {}).get("serverchan_key", "").startswith("SCT390799"))
+    check("Evan 全局push继承", evan.get("push", {}).get("serverchan_key", "").startswith("SCT390761"))
 
     base = {"a": {"x": 1, "y": 2}, "l": [1, 2]}
     over = {"a": {"y": 3}, "l": [9]}

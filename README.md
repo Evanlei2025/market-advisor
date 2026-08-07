@@ -2,7 +2,7 @@
 
 规则化投顾日报：每天收盘后采集市场数据，**规则引擎输出确定性信号，AI 只做受约束解读**，推送到微信。**只出建议不自动交易；出入金均由你手动执行。**
 
-**多客户模式**：一个实例服务多个客户。`config.json` 全局段（push/rules 出厂默认/settlement/news_watch）+ `clients` 字典（每客户：target/products/holdings/transactions/组合名）。每客户独立执行：产品分析→指令→叙事→AI 解读→报告→推送；市场数据一次采集共享。当前客户：`Evan_Lei`（真实持仓）、`Harley_Lei`、`NULL_Xue`（有关注池、持仓待确认）、`Jing_Wang`（空壳）。客户接入流程见 `docs/CLIENT_ONBOARDING.md`（含 Server酱注册与 SendKey 获取指南）。
+**多客户模式**：一个实例服务多个客户。`config.json` 全局段（push/rules 出厂默认/settlement/news_watch）+ `clients` 字典（每客户：target/products/holdings/transactions/组合名）。每客户独立执行：产品分析→指令→叙事→AI 解读→报告→推送；市场数据一次采集共享。当前客户：`Evan_Lei`（真实持仓）、`Harley_Lei`、`NULL_Xue`（有关注池、持仓待确认）、`Echo_Wang`（空壳）。客户接入流程见 `docs/CLIENT_ONBOARDING.md`（含 Server酱注册与 SendKey 获取指南）。
 
 ## 架构
 
