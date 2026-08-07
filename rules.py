@@ -5,6 +5,10 @@ V2.3：市值口径算账、动态止盈（上限门+峰值回撤保护+短仓�
 买入冻结（市场预警，仅最保守仓位档）、关注池买入（含零持仓）、冷却期、在途资金。
 5.x：创业板估值信号(LAD-CYB-90)、EP安全阀动态阈值(5.4)、止盈边界完善(5.5)、
 组合基准对比(5.1)、买入候选评分(5.2)、配置静态校验(5.6)。
+V3：买入候选评分重构（P0 止血：rf 链/σ下限/平滑检测/完整度门槛；P1 结构重构：
+同类分组 + 组内百分位 + 新权重 边际贡献20/TCO18/风格中性超额17/尾部风险15/稳定性15/可交易性15；
+P2 贝叶斯收缩）、复权列契约 ret_col（main.py 自动接管）、候选硬门槛
+（成立<18月/暂停申购|限大额/规模<2亿 于 cands 过滤处剔除）、换手抑制（held +5 分缓冲）。
 """
 import math
 
@@ -172,13 +176,29 @@ def _sigma_ref(cfg, exposure):
     return v_mix + (v_eq - v_mix) * (exposure - 0.2) / 0.6
 
 
+def ret_col(df):
+    """复权收益列（A7 契约）：df 含 nav_adj 列 → 用它（分红再投资口径），否则回退 nav。
+    main.py 的 _ret_col_local 会自动接管本函数；Series 输入原样返回；异常 → None。"""
+    try:
+        if df is None:
+            return None
+        if hasattr(df, "columns"):
+            if "nav_adj" in df.columns:
+                return df["nav_adj"]
+            return df["nav"]
+        return df
+    except Exception:
+        return None
+
+
 def ewma_vol(nav_series, lam=0.94):
-    """EWMA(λ=0.94) 日收益年化波动率。数据不足返回 None"""
+    """EWMA(λ=0.94) 日收益年化波动率（复权口径 ret_col；nav 无 nav_adj 列时行为不变）。
+    数据不足返回 None。公式本身不许动——F_vol 因子消费本函数，口径变化影响 T_eff 数值属预期"""
     import pandas as pd
     try:
         if nav_series is None or len(nav_series) < 30:
             return None
-        rets = nav_series["nav"].pct_change().dropna()
+        rets = ret_col(nav_series).pct_change().dropna()
         if len(rets) < 20:
             return None
         var = rets.iloc[0] ** 2
@@ -480,96 +500,599 @@ def _piecewise(x, pts):
     return float(pts[-1][1])
 
 
-def score_candidate(pctx, cfg):
-    """买入候选评分（5.2）。维度：夏普40 / 最大回撤20 / 费率15 / 规模10 / 同类排名10。
-    缺失维度跳过并按剩余权重比例重归一；全部缺失返回 None（不参与排序，排最后）。
-    分数区间 0-100，越高越优；纯确定性：同一 pctx 恒得同一分。"""
+# ---------------- 买入候选评分 V3（P0 止血 + P1 结构重构 + P2 贝叶斯收缩） ----------------
+_CAND_DIMS = [
+    ('marginal', 20, '边际贡献'),
+    ('tco', 18, 'TCO'),
+    ('alpha', 17, '风格中性超额'),
+    ('tail', 15, '尾部风险'),
+    ('stability', 15, '运作稳定性'),
+    ('tradability', 15, '可交易性'),
+]
+_THEME_WORDS = ('半导体', '医药', '医疗', '消费', '红利', '煤炭', '军工', '新能源',
+                '港股', '白酒', '科技', '银行', '证券', '地产', '汽车', '有色',
+                '化工', '农业', '传媒', '通信', '电子', '光伏', '碳中和', '环保',
+                '食品', '保险', '计算机', '芯片', '科创', '中概', '高端装备', '智能')
+_candidate_pool = []      # 本轮候选 pctx 列表（build_order_book 过滤后设置；用后清理）
+_candidate_others = []    # 组合内其他产品 pctx 列表（边际贡献用）
+
+
+def candidate_weights():
+    """V3 权重表（=100）：marginal20 / tco18 / alpha17 / tail15 / stability15 / tradability15"""
+    return {d: w for d, w, _ in _CAND_DIMS}
+
+
+def _set_candidate_pool(pool, others=None):
+    """设置本轮候选池（build_order_book 在 cands 排序前调用；score_candidate 从中取同组样本。）
+    pool: list[pctx]（已过滤候选）；others: list[pctx]（组合其他产品，边际贡献用）。
+    模块级全局（单线程主流程；调用方须在结束后调用 _clear_candidate_pool）。"""
+    global _candidate_pool, _candidate_others
+    _candidate_pool = [p for p in (pool or []) if isinstance(p, dict)]
+    _candidate_others = [p for p in (others or []) if isinstance(p, dict)]
+
+
+def _clear_candidate_pool():
+    global _candidate_pool, _candidate_others
+    _candidate_pool = []
+    _candidate_others = []
+
+
+def _peer_group(pctx):
+    """同类分组键：f"组合：大类"。大类 = type（equity/mixed/bond/gold/other）；
+    风格 = 名称关键词推导（指数/ETF/LOF→指数；量化/多因子→量化；主题词→主题；否则主动）。
+    bench_index 作为分组信息来源预留（现由名称关键词承载）。"""
+    if not isinstance(pctx, dict):
+        return 'other:主动'
+    big = str(pctx.get('type') or 'other').strip().lower() or 'other'
+    name = str(pctx.get('name') or '')
+    if any(k in name for k in ('指数', 'ETF', 'LOF')):
+        style = '指数'
+    elif any(k in name for k in ('量化', '多因子')):
+        style = '量化'
+    elif any(k in name for k in _THEME_WORDS):
+        style = '主题'
+    else:
+        style = '主动'
+    return '%s:%s' % (big, style)
+
+
+def _parse_mdd(v):
+    """max_dd 解析：兼容 '-17.9%'（剥 %/100）与数值；NaN → None"""
+    try:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            f = float(v.strip().replace('%', '')) / 100.0
+        else:
+            f = float(v)
+        return f if f == f else None
+    except Exception:
+        return None
+
+
+def _parse_scale(v):
+    """规模解析（亿元）：'43.53亿'→43.53；'1.2万'→ 0.00012（万→/10000）；纯数值→原值；非法→None"""
+    try:
+        if v is None:
+            return None
+        s = str(v).strip().replace(',', '').replace('元', '').replace('人民币', '')
+        if not s:
+            return None
+        if '万' in s:
+            f = float(s.replace('万', '')) / 10000.0
+        else:
+            f = float(s.replace('亿', ''))
+        return f if f == f else None
+    except Exception:
+        return None
+
+
+def _top10_names(top10):
+    """top10 股票名列表：兼容 [{'stock_name':..,'weight':..}] 与 [字符串]"""
+    out = []
+    try:
+        for item in (top10 or []):
+            if isinstance(item, dict):
+                n = str(item.get('stock_name') or item.get('name') or item.get('code') or '').strip()
+            else:
+                n = str(item).strip()
+            if n:
+                out.append(n)
+    except Exception:
+        return []
+    return out
+
+
+def _rets(pctx, dated=False):
+    """复权日收益序列（ret_col 口径）；数据不足/异常 → None。dated=True 时索引改为日期（相关性对齐）"""
+    try:
+        if not isinstance(pctx, dict):
+            return None
+        df = pctx.get('nav_series')
+        if df is None:
+            return None
+        rc = ret_col(df)
+        if rc is None or len(rc) < 2:
+            return None
+        import pandas as pd
+        s = rc.pct_change()
+        if dated and hasattr(df, 'columns') and 'date' in df.columns:
+            s = s.copy()
+            s.index = pd.to_datetime(df['date'])
+        s = s.dropna()
+        return s if len(s) >= 2 else None
+    except Exception:
+        return None
+
+
+def _ret_last_n(rets, n):
+    """最近 n 日累计收益（复权口径）"""
+    r = rets.tail(min(int(n), len(rets)))
+    return float((1.0 + r).prod() - 1.0)
+
+
+def _rank01(vals, own):
+    """组内百分位：（低于数 + 0.5×等值数）/ 样本数；空 → 0.5"""
+    n = len(vals)
+    if n == 0:
+        return 0.5
+    below = sum(1 for v in vals if v < own)
+    equal = sum(1 for v in vals if v == own)
+    return (below + 0.5 * equal) / n
+
+
+def _rank_in_group(v, vals):
+    """winsorize（1%/99% 分位夹取）后组内百分位；组内单样本/空 → 0.5"""
+    if v is None or v != v:
+        return 0.5
+    vals = [x for x in vals if x is not None and x == x]
+    if not vals or len(vals) < 2:
+        return 0.5
+    import pandas as pd
+    s = pd.Series(vals)
+    q01 = float(s.quantile(0.01))
+    q99 = float(s.quantile(0.99))
+    clipped = [max(q01, min(q99, x)) for x in vals]
+    own = max(q01, min(q99, v))
+    return _rank01(clipped, own)
+
+
+def _shrink_pct(own_idx, rets, srs, years):
+    """P2 贝叶斯收缩：组内 250 日收益 → 收缩后组内百分位（0~1）。
+    SE_i = sqrt((1+SR_i²/2)/年数_i)；τ = 组内横截面标准差；λ_i = τ²/(τ²+SE_i²)；
+    收缩后_i = 组内中位数 + λ_i×(本值_i−中位数)。组内样本 <2 或 τ=0 → 0.5。"""
+    n = len(rets)
+    if n < 2:
+        return 0.5
+    xs = [float(x) for x in rets]
+    if any(x != x for x in xs):
+        return 0.5
+    sx = sorted(xs)
+    m = sx[n // 2] if n % 2 else (sx[n // 2 - 1] + sx[n // 2]) / 2.0
+    tau = math.sqrt(sum((x - m) ** 2 for x in xs) / n)
+    if tau == 0:
+        return 0.5
+    shrunk = []
+    for i, x in enumerate(xs):
+        sr = srs[i] if i < len(srs) else 0.0
+        if sr is None or sr != sr:
+            sr = 0.0
+        y = years[i] if i < len(years) else 1.0
+        y = max(float(y), 1.0 / 250.0)
+        se = math.sqrt((1.0 + sr * sr / 2.0) / y)
+        lam = tau * tau / (tau * tau + se * se)
+        shrunk.append(m + lam * (x - m))
+    return _rank01(shrunk, shrunk[own_idx])
+
+
+def _excess_alpha(pctx, cfg, rf):
+    """风格中性超额：0.5×夏普（P0 口径：rf 链、σ下限 0.01）+ 0.5×组内 250 日收益
+    贝叶斯收缩百分位（P2；池缺失/组内单样本 → 0.5 中性）。
+    平滑检测：复权日收益一阶自相关 >0.9 → 判定平滑产品，子分用 0.5（不进正常池）。"""
+    rets = _rets(pctx)
+    if rets is None or len(rets) < 20:
+        return None
+    mu = float(rets.mean()) * 250.0
+    vol = float(rets.std() * math.sqrt(250.0))
+    if mu != mu or vol != vol:
+        return 0.5
+    vol = max(vol, 0.01)
+    sr_ann = (mu - rf) / vol
+    sharpe = max(0.0, min(1.0, sr_ann / 2.0))
+    try:
+        auto = float(rets.autocorr(lag=1))
+        if auto == auto and auto > 0.9:
+            return 0.5
+    except Exception:
+        pass
+    own_in = len(rets) >= 30
+    grp_ret, grp_sr, grp_yr = [], [], []
+    if own_in:
+        grp_ret.append(_ret_last_n(rets, 250))
+        grp_sr.append(sr_ann)
+        grp_yr.append(len(rets) / 250.0)
+    if _candidate_pool:
+        gk = _peer_group(pctx)
+        seen = {id(pctx)}
+        for q in _candidate_pool:
+            if q is pctx or id(q) in seen or not isinstance(q, dict):
+                continue
+            seen.add(id(q))
+            if _peer_group(q) != gk:
+                continue
+            qr = _rets(q)
+            if qr is None or len(qr) < 30:
+                continue
+            qmu = float(qr.mean()) * 250.0
+            qvol = float(qr.std() * math.sqrt(250.0))
+            if qvol != qvol or qvol <= 0:
+                qvol = 0.01
+            qvol = max(qvol, 0.01)
+            grp_ret.append(_ret_last_n(qr, 250))
+            grp_sr.append((qmu - rf) / qvol)
+            grp_yr.append(len(qr) / 250.0)
+    pct = 0.5
+    if own_in and len(grp_ret) >= 2:
+        pct = _shrink_pct(0, grp_ret, grp_sr, grp_yr)
+    return 0.5 * sharpe + 0.5 * pct
+
+
+def _tail_risk(pctx):
+    """尾部风险：MaxDD 子分（1-abs，复权口径，nav_series 优先）+
+    CVaR95 子分（-5% 分位，/0.03 归一）+ 下行波动子分（负收益日标准差，同归一），三部分平均。
+    nav_series 不足 30 日时 MaxDD 回退 pctx.max_dd（'-17.9%'/数值兼容）。"""
+    parts = []
+    rets = _rets(pctx)
+    if rets is not None and len(rets) >= 30:
+        nav = (1.0 + rets).cumprod()
+        mdd = float((nav / nav.cummax() - 1.0).min())
+        parts.append(max(0.0, min(1.0, 1.0 - abs(mdd))))
+        q05 = float(rets.quantile(0.05))
+        if q05 == q05:
+            cvar = max(0.0, -q05)
+            parts.append(max(0.0, min(1.0, 1.0 - min(1.0, cvar / 0.03))))
+        neg = rets[rets < 0.0]
+        if len(neg) >= 2:
+            dvol = float(neg.std())
+            if dvol == dvol:
+                parts.append(max(0.0, min(1.0, 1.0 - min(1.0, dvol / 0.03))))
+    else:
+        mdd = _parse_mdd(pctx.get('max_dd'))
+        if mdd is not None:
+            parts.append(max(0.0, min(1.0, 1.0 - abs(mdd))))
+    if not parts:
+        return None
+    return sum(parts) / len(parts)
+
+_TCO_PATTERNS = (
+    ('管理费', r'管理费([\d.]+)%'),
+    ('管理', r'管理([\d.]+)%'),
+    ('托管费', r'托管费([\d.]+)%'),
+    ('托管', r'托管([\d.]+)%'),
+    ('销售服务费', r'销售服务费([\d.]+)%'),
+    ('销售服务', r'销售服务([\d.]+)%'),
+    ('申购', r'申购([\d.]+)%'),
+    ('短期赎回', r'短期赎回([\d.]+)%'),
+)
+
+
+def _tco_score(pctx, cfg):
+    """TCO（总持有成本）：(管理+托管+销售服务)×持有年数 + 申购费 + 持有期赎回费。
+    量纲契约：接口边界写死小数口径——解析出的百分数一律 /100 转小数（失败项跳过）；
+    满分基准 2%：score = 1 - min(1, 合计/0.02)，clamp 0-1。
+    持有年数默认 2（cfg.rules.candidate_holding_years 可配）。A/C 份额择优不自动做（config 人工选）。"""
+    import re
+    ongoing, one_time = [], []
+    fees_txt = str(pctx.get('fees') or '')
+    if fees_txt and fees_txt != '无':
+        for key, pat in _TCO_PATTERNS:
+            m = re.search(pat, fees_txt)
+            if m:
+                try:
+                    v = float(m.group(1)) / 100.0
+                    if v == v:
+                        (ongoing if key in ('管理费', '管理', '托管费', '托管',
+                                           '销售服务费', '销售服务') else one_time).append(v)
+                except Exception:
+                    pass
+    if not ongoing and not one_time:
+        for kk in ('mgmt_fee', 'manage_fee', 'custody_fee', 'sales_service_fee'):
+            v = pctx.get(kk)
+            if v is not None:
+                try:
+                    v = float(v)
+                    if v == v:
+                        ongoing.append(v / 100.0 if v > 1.0 else v)
+                except Exception:
+                    pass
+        for kk in ('purchase_fee', 'short_redeem_fee', 'redeem_fee'):
+            v = pctx.get(kk)
+            if v is not None:
+                try:
+                    v = float(v)
+                    if v == v:
+                        one_time.append(v / 100.0 if v > 1.0 else v)
+                except Exception:
+                    pass
+    if not ongoing and not one_time:
+        return None
+    years = 2.0
+    try:
+        y = float((cfg.get('rules') or {}).get('candidate_holding_years', 2.0))
+        if y == y and y > 0:
+            years = y
+    except Exception:
+        pass
+    total = sum(ongoing) * years + sum(one_time)
+    return max(0.0, min(1.0, 1.0 - min(1.0, total / 0.02)))
+
+
+def _marginal_contribution(pctx):
+    """边际贡献：0.5×(1−与组合其他产品复权收益相关性均值) + 0.5×(1−top10 重合率)。
+    其他产品 = _candidate_others（build_order_book 传入组合内 held 产品 pctx）；
+    低相关=高贡献；重合率 = 重合股票数 / 本产品 top10 数。
+    数据缺失的部分用 0.5 中性；自身无序列且无 top10 → None（维度缺失）。"""
+    own_ret = _rets(pctx, dated=True)
+    if own_ret is not None and len(own_ret) < 20:
+        own_ret = None
+    corrs = []
+    for o in _candidate_others:
+        if o is pctx or not isinstance(o, dict):
+            continue
+        osr = _rets(o, dated=True)
+        if osr is None or len(osr) < 20:
+            continue
+        if own_ret is None:
+            continue
+        common = own_ret.index.intersection(osr.index)
+        if len(common) < 20:
+            continue
+        a, b = own_ret.loc[common], osr.loc[common]
+        if float(a.std()) == 0.0 or float(b.std()) == 0.0:
+            continue
+        c = float(a.corr(b))
+        if c == c:
+            corrs.append(c)
+    half1 = 1.0 - (sum(corrs) / len(corrs)) if corrs else 0.5
+    half1 = max(0.0, min(1.0, half1))
+    cand_names = _top10_names(pctx.get('top10'))
+    other_names = set()
+    for o in _candidate_others:
+        if o is pctx or not isinstance(o, dict):
+            continue
+        other_names.update(_top10_names(o.get('top10')))
+    if not cand_names:
+        half2 = 0.5
+    elif not other_names:
+        half2 = 0.5
+    else:
+        half2 = 1.0 - len(set(cand_names) & other_names) / float(len(cand_names))
+    if own_ret is None and not cand_names:
+        return None
+    return 0.5 * half1 + 0.5 * half2
+
+
+def _stability(pctx):
+    """运作稳定性（15 分维度）：经理任期三态 10 分 + 规模适配 5 分。
+    任期：state_store.manager_tenure_days(code, config_since=manager_since) ≥12月 → 1.0；
+    <12月（已知短任期）→ 0.85；未知 → 0.95。
+    规模：指数/ETF/LOF 类越大越好（<5亿 0.4；5-50亿 0.6→1.0 线性；>50亿 1.0）；
+    主动类容量曲线（50-300 亿满分区，同 _piecewise）；规模缺失 → 0.5 中性。
+    注：规模数据为季报口径（滞后 1-3 个月），仅注释说明不参与打分。"""
+    code = str(pctx.get('code') or '').strip()
+    mgr_since = pctx.get('manager_since')
+    days = None
+    try:
+        import state_store
+        days = state_store.manager_tenure_days(code, config_since=mgr_since)
+    except Exception:
+        days = None
+    avail = (days is not None) or bool(code) or bool(mgr_since)
+    tenure = 1.0 if (days is not None and days >= 365) else (0.85 if days is not None else 0.95)
+    scale = _parse_scale(pctx.get('scale'))
+    if scale is not None:
+        avail = True
+    if scale is None:
+        scale_s = 0.5
+    else:
+        name = str(pctx.get('name') or '')
+        if any(k in name for k in ('指数', 'ETF', 'LOF')):
+            scale_s = _piecewise(scale, [(0.0, 0.4), (5.0, 0.6), (50.0, 1.0)])
+        else:
+            scale_s = _piecewise(scale, [(0.0, 0.0), (1.0, 0.2), (5.0, 0.8),
+                                         (50.0, 1.0), (300.0, 1.0), (600.0, 0.6), (2000.0, 0.2)])
+    if not avail:
+        return None
+    return (10.0 * tenure + 5.0 * scale_s) / 15.0
+
+
+def _tradability(pctx):
+    """可交易性：申购状态 + 日限额 + 最短持有期（费率表），三部分平均。
+    申购状态：开放=1.0 / 限大额=0.6 / 暂停申购=0.0（已被硬过滤剔除，此处兜底）/ 未知=0.7；
+    日限额（purchase_meta.daily_limit）：None/0 → 0.7；0-1万 → 0.3→1.0 线性；≥1万 → 1.0；
+    最短持有：fees 含「短期赎回」且费率>0 → 0.8；否则 → 1.0。确认时效不深挖（实现简化）。"""
+    import re
+    parts = []
+    avail = False
+    status = pctx.get('purchase_status')
+    if status is not None:
+        avail = True
+    parts.append({'开放申购': 1.0, '限大额': 0.6, '暂停申购': 0.0}.get(status, 0.7))
+    pm = pctx.get('purchase_meta') or {}
+    if not isinstance(pm, dict):
+        pm = {}
+    dl = None
+    if pm.get('daily_limit') is not None:
+        try:
+            dl = float(pm.get('daily_limit'))
+            if dl != dl:
+                dl = None
+        except Exception:
+            dl = None
+    if dl is not None:
+        avail = True
+    if dl is None or dl <= 0:
+        dl_s = 0.7
+    elif dl >= 10000:
+        dl_s = 1.0
+    else:
+        dl_s = 0.3 + 0.7 * dl / 10000.0
+    parts.append(dl_s)
+    fees_txt = str(pctx.get('fees') or '')
+    m = re.search(r'短期赎回([\d.]+)%', fees_txt)
+    if m:
+        avail = True
+        try:
+            short = float(m.group(1))
+            parts.append(0.8 if short > 0 else 1.0)
+        except Exception:
+            parts.append(1.0)
+    else:
+        parts.append(1.0)
+    if not avail:
+        return None
+    return sum(parts) / len(parts)
+
+
+def _synthesize(weighted, tail_s, trad_s, completeness):
+    """合成：基础加权分（0-100）× 惩罚项 × 完整度折扣。
+    惩罚（及格线，仅尾部/可交易）：子分 <0.3 → ×0.6；完整度折扣 = 0.9 + 0.1×完整度。"""
+    s = float(weighted)
+    if tail_s is not None and tail_s == tail_s and tail_s < 0.3:
+        s *= 0.6
+    if trad_s is not None and trad_s == trad_s and trad_s < 0.3:
+        s *= 0.6
+    s *= 0.9 + 0.1 * float(completeness)
+    return s
+
+
+def _dim_raw(dim, pctx, cfg, rf):
+    try:
+        if dim == 'marginal':
+            return _marginal_contribution(pctx)
+        if dim == 'tco':
+            return _tco_score(pctx, cfg)
+        if dim == 'alpha':
+            return _excess_alpha(pctx, cfg, rf)
+        if dim == 'tail':
+            return _tail_risk(pctx)
+        if dim == 'stability':
+            return _stability(pctx)
+        if dim == 'tradability':
+            return _tradability(pctx)
+    except Exception:
+        return None
+    return None
+
+
+def _group_median(dim, group, cfg, rf):
+    vals = [_dim_raw(dim, q, cfg, rf) for q in group]
+    vals = [x for x in vals if x is not None and x == x]
+    if not vals:
+        return 0.5
+    sx = sorted(vals)
+    n = len(sx)
+    return sx[n // 2] if n % 2 else (sx[n // 2 - 1] + sx[n // 2]) / 2.0
+
+
+def score_candidate(pctx, cfg, rf_annual=None):
+    """买入候选评分 V3（P0 止血 + P1 结构重构 + P2 贝叶斯收缩）。
+    维度：边际贡献20 / TCO18 / 风格中性超额17 / 尾部风险15 / 运作稳定性15 / 可交易性15。
+    - 子分 0~1：winsorize（1%/99%）后组内百分位（_candidate_pool 同组；无池 → 原始值；
+      组内单样本 → 0.5）；缺失子分 → 组内中位数填充（无池/组空 → 0.5）；
+    - 完整度门槛：可用维度权重 /100 < 0.8 → 返回 None（出局，不参与排序）；
+    - 合成：100×Σ(w·s)/Σw（权重恒 100，防御性归一）× 惩罚项（尾部/可交易 <0.3 → ×0.6）
+      × 完整度折扣（0.9+0.1×完整度）；
+    - 纯确定性：同一输入恒得同一分；AI 无权修改本函数输出。
+    签名契约：score_candidate(pctx, cfg, rf_annual=None)（build_order_book 传 ctx.rf_annual）。"""
     if pctx is None or not isinstance(pctx, dict):
         return None
-    import math
-    import re
-    dims = []   # [(weight, score01)]
-
-    # 1) 夏普（40）：年化收益 / 年化波动（各 250 日化）；夏普 ≥2 计满分，≤0 计 0
-    nav = pctx.get("nav_series")
-    if nav is not None:
-        try:
-            rets = nav["nav"].pct_change().dropna()
-            if len(rets) >= 20:
-                mu = float(rets.mean()) * 250
-                vol = float(rets.std() * math.sqrt(250))
-                if vol == vol and vol > 0 and mu == mu:
-                    dims.append((40, max(0.0, min(1.0, mu / vol / 2.0))))
-        except Exception:
-            pass
-
-    # 2) 最大回撤（20）：1 - max_dd（越小越好）
-    mdd = pctx.get("max_dd")
-    if mdd is not None:
-        try:
-            mdd = float(mdd)
-            if mdd == mdd:
-                dims.append((20, max(0.0, min(1.0, 1.0 - mdd))))
-        except Exception:
-            pass
-
-    # 3) 费率（15）：管理费 + 短期赎回费（低者优；合计 ≥3% 计 0）
-    fee_parts = []
+    cfg = cfg if isinstance(cfg, dict) else {}
+    rf = rf_annual if rf_annual is not None else (cfg.get('rules') or {}).get('risk_free_rate', 0.015)
     try:
-        for kk in ("mgmt_fee", "manage_fee", "redeem_fee", "short_redeem_fee"):
-            v = pctx.get(kk)
-            if v is None:
-                continue
-            v = float(v)
-            fee_parts.append(v / 100.0 if v > 1.0 else v)   # 兼容 "1.2" 与 "0.012" 两种写法
-        if not fee_parts:
-            fees_txt = str(pctx.get("fees") or " ")
-            for pat in (r"管理费([\d.]+)%", r"短期赎回([\d.]+)%"):
-                m = re.search(pat, fees_txt)
-                if m:
-                    fee_parts.append(float(m.group(1)) / 100.0)
+        rf = float(rf)
+        if rf != rf:
+            rf = 0.0
     except Exception:
-        fee_parts = []
-    if fee_parts:
-        fee_total = sum(fee_parts)
-        if fee_total == fee_total:
-            dims.append((15, max(0.0, min(1.0, 1.0 - fee_total / 0.03))))
+        rf = 0.0
+    own = {}
+    avail_w = 0
+    for dim, w, _ in _CAND_DIMS:
+        v = _dim_raw(dim, pctx, cfg, rf)
+        own[dim] = v
+        if v is not None:
+            avail_w += w
+    completeness = avail_w / 100.0
+    if completeness < 0.8:
+        return None
+    gk = _peer_group(pctx)
+    group = [pctx]
+    if _candidate_pool:
+        seen = {id(pctx)}
+        for q in _candidate_pool:
+            if q is pctx or id(q) in seen or not isinstance(q, dict):
+                continue
+            seen.add(id(q))
+            if _peer_group(q) == gk:
+                group.append(q)
+    rank_mode = bool(_candidate_pool)
+    subs = {}
+    for dim, w, _ in _CAND_DIMS:
+        v = own[dim]
+        if v is None:
+            if rank_mode and len(group) >= 2:
+                subs[dim] = _group_median(dim, group, cfg, rf)
+            else:
+                subs[dim] = 0.5
+            continue
+        if v != v:
+            subs[dim] = 0.5
+            continue
+        if rank_mode:
+            if len(group) >= 2:
+                vals = [_dim_raw(dim, q, cfg, rf) for q in group]
+                subs[dim] = _rank_in_group(v, vals)
+            else:
+                subs[dim] = 0.5          # 组内单样本 → 中性 0.5
+        else:
+            subs[dim] = v
+    total_w = sum(w for _, w, _ in _CAND_DIMS)
+    weighted = sum(w * subs[dim] for dim, w, _ in _CAND_DIMS)
+    base = 100.0 * weighted / total_w if total_w > 0 else 0.0
+    score = _synthesize(base, subs.get('tail'), subs.get('tradability'), completeness)
+    # ---- P2 埋点：饱和率/缺失率（一条汇总行，仅观测不参与打分） ----
+    try:
+        sat = sum(1 for d, _, _ in _CAND_DIMS if subs.get(d) is not None and subs[d] in (0.0, 1.0))
+        miss = sum(1 for v in own.values() if v is None)
+        print('[rules] candidate_scores: code=%s pool=%d grp=%s avail=%d/6 sat=%d/6 miss=%d/6 score=%.2f'
+              % (str(pctx.get('code') or '?'), len(_candidate_pool), gk,
+                 sum(1 for v in own.values() if v is not None), sat, miss, score))
+    except Exception:
+        pass
+    return score
 
-    # 4) 规模（10）：1亿-300亿适中（过小清盘风险、过大钝化；单位：亿元）
-    sc = pctx.get("scale")
-    if sc is not None:
+
+def _gate_reason(p, pc, today):
+    """候选硬门槛（V3，cands 列表过滤处执行，非评分返回）：
+    成立 <18 个月 / 申购状态 暂停申购|限大额 / 规模 <2 亿 → 返回原因字符串；
+    非法/缺失 → None（fail-open：缺失不过度拦截）。p=产品 dict，pc=pctx。"""
+    from datetime import datetime
+    inc = pc.get('inception')
+    if inc:
         try:
-            sc = float(sc)
-            if sc == sc:
-                pts = [(0.0, 0.0), (1.0, 0.2), (5.0, 0.8), (50.0, 1.0),
-                       (300.0, 1.0), (600.0, 0.6), (2000.0, 0.2)]
-                dims.append((10, _piecewise(sc, pts)))
+            d0 = datetime.strptime(str(inc)[:10], '%Y-%m-%d').date()
+            d_t = datetime.strptime(str(today)[:10], '%Y-%m-%d').date()
+            if (d_t - d0).days < 548:
+                return '成立<18个月(%s)' % str(inc)[:10]
         except Exception:
             pass
-
-    # 5) 同类排名（10）：解析 "近1年 12/500" → 百分位越低越优
-    rank = pctx.get("ranking")
-    if rank is not None:
-        pct = None
-        try:
-            if isinstance(rank, (int, float)):
-                pct = float(rank)
-            else:
-                m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+)", str(rank))
-                if m:
-                    den = float(m.group(2))
-                    pct = float(m.group(1)) / den if den > 0 else None
-        except Exception:
-            pct = None
-        if pct is not None and pct == pct:
-            dims.append((10, max(0.0, min(1.0, 1.0 - pct))))
-
-    if not dims:
-        return None
-    total_w = sum(dw for dw, _ in dims)
-    if total_w <= 0:
-        return None
-    return 100.0 * sum(dw * sc01 for dw, sc01 in dims) / total_w
+    ps = pc.get('purchase_status')
+    if ps in ('暂停申购', '限大额'):
+        return '申购受限(%s)' % ps
+    sc = _parse_scale(pc.get('scale'))
+    if sc is not None and sc < 2.0:
+        return '规模<2亿(%s)' % str(pc.get('scale'))
+    return None
 
 
 def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
@@ -674,32 +1197,55 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
         # 权益缺口：目标 − 当前（含在途赎回按到账后计，买入以当前可用现金为上限）
         eq_gap = eq_target_amt - equity_mv
         if eq_gap > 0 and not ep_lock:
+            pctx_map = ctx.get('product_ctx') or {}
             cands = [p for p in products
-                     if p.get("type") in ("equity", "gold") and remaining.get(p.get("code"), 0) >= 0
-                     and p.get("status") in ("held", "observe")]
-            # 买入候选排序（5.2）：score_candidate 降序；评分缺失（数据全缺）排最后，
+                     if p.get('type') in ('equity', 'gold') and remaining.get(p.get('code'), 0) >= 0
+                     and p.get('status') in ('held', 'observe')]
+            # ---- 硬门槛（V3，P0）：成立<18个月 / 暂停申购|限大额 / 规模<2亿 → 出局（cands 过滤处，非评分返回） ----
+            kept = []
+            for p in cands:
+                why = _gate_reason(p, pctx_map.get(p.get('code', '')) or {}, today)
+                if why:
+                    try:
+                        print('[rules] 候选剔除 %s(%s): %s' % (p.get('code', ''), p.get('name', ''), why))
+                    except Exception:
+                        pass
+                    continue
+                kept.append(p)
+            cands = kept
+            # 买入候选排序（V3）：score_candidate 降序；评分缺失（数据全缺）排最后；
+            # 换手抑制：已持有同类（同 type）产品排序键 +5 分缓冲——候选须领先已持 >5 分才换手；
             # 同分/缺失组内保持原兜底顺序（已持有优先、代码序）
-            pctx_map = ctx.get("product_ctx") or {}
-
             def _buy_key(p):
                 sc = None
                 if pctx_map:
-                    sc = score_candidate(pctx_map.get(p.get("code", "")) or {}, cfg)
-                st_rk = 0 if p.get("status") == "held" else 1
+                    sc = score_candidate(pctx_map.get(p.get('code', '')) or {}, cfg,
+                                         rf_annual=ctx.get('rf_annual'))
+                st_rk = 0 if p.get('status') == 'held' else 1
                 if sc is None:
-                    return (1, 0, st_rk, p.get("code", ""))
-                return (0, -sc, st_rk, p.get("code", ""))
-            cands.sort(key=_buy_key)
+                    return (1, 0, st_rk, p.get('code', ''))
+                eff = sc + (5.0 if p.get('status') == 'held' else 0.0)
+                return (0, -eff, st_rk, p.get('code', ''))
             if cands:
-                code = cands[0]["code"]
-                amt = round(min(eq_gap, max(0.0, cash_now - cash_target_amt)), 2)
-                if amt >= min_amt:
-                    orders.append({"side": "买入", "code": code, "name": names.get(code, code),
-                                   "amount": amt, "shares": None,
-                                   "reason": "再平衡：权益低于目标仓位" + ("（关注池建仓）" if remaining.get(code, 0) <= 0 else ""),
-                                   "stop": False, "rule_id": "BUY-NEW" if remaining.get(code, 0) <= 0 else "REB-EQ"})
-                    cash_now -= amt
-                    remaining[code] = remaining.get(code, 0) + amt
+                # 候选池（组内百分位上下文）+ 组合其他产品（边际贡献上下文）；用后清理
+                _set_candidate_pool(
+                    [pctx_map.get(p.get('code', '')) or {} for p in cands],
+                    [pc for pc in (ctx.get('product_ctx') or {}).values()
+                     if isinstance(pc, dict) and pc.get('status') == 'held'])
+                try:
+                    cands.sort(key=_buy_key)
+                    if cands:
+                        code = cands[0]['code']
+                        amt = round(min(eq_gap, max(0.0, cash_now - cash_target_amt)), 2)
+                        if amt >= min_amt:
+                            orders.append({'side': '买入', 'code': code, 'name': names.get(code, code),
+                                           'amount': amt, 'shares': None,
+                                           'reason': '再平衡：权益低于目标仓位' + ('（关注池建仓）' if remaining.get(code, 0) <= 0 else ''),
+                                           'stop': False, 'rule_id': 'BUY-NEW' if remaining.get(code, 0) <= 0 else 'REB-EQ'})
+                            cash_now -= amt
+                            remaining[code] = remaining.get(code, 0) + amt
+                finally:
+                    _clear_candidate_pool()
 
         bd_gap = bd_target_amt - bond_mv
         if bd_gap > 0:

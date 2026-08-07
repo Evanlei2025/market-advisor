@@ -33,6 +33,8 @@
     "pending_cash": [],
     "total_mv": 0.0,
     "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
     "client": "Echo_Wang"
   },
   {
@@ -54,13 +56,15 @@
         "note": "用户自行操作，占原持仓1/3"
       }
     ],
-    "total_mv": 2481.48186,
+    "total_mv": 2504.076945,
     "tp_signals": [
       {
         "code": "006195",
         "action": "tp_dd"
       }
     ],
+    "storm_active": true,
+    "eq_target": 0.05,
     "client": "Evan_Lei"
   },
   {
@@ -70,6 +74,8 @@
     "pending_cash": [],
     "total_mv": 0.0,
     "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
     "client": "Harley_Lei"
   },
   {
@@ -79,6 +85,8 @@
     "pending_cash": [],
     "total_mv": 0.0,
     "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
     "client": "NULL_Xue"
   }
 ]

@@ -128,6 +128,7 @@ class DataFetcher:
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
         self._top10_cache = {}  # 基金重仓股进程内缓存 {fund_code: list|None}（A4）
+        self._purchase_cache = None  # 全市场申赎状态表缓存（A7：进程内只拉一次）
 
     def index_daily(self, tx_symbol, days=320):
         try:
@@ -378,17 +379,75 @@ class DataFetcher:
         return df.reset_index(drop=True)
 
     def fund_nav_history(self, fund_code):
+        # 复权序列 nav_adj（分红再投资口径）：r_t = (A_t - A_{t-1}) / NAV_{t-1}，A=累计净值，NAV=单位净值
+        # 异常护栏：|r_t| > 15% → log 告警并回退 growth/100（growth 为 NaN → 0）；首日 r_t = 0
+        # 累计净值拉取失败/全空 → nav_adj = nav（列始终存在，下游无需判列缺失）
         df = self.ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
         c_date = _pick_cols(df, "净值日期")
         c_nav = _pick_cols(df, "单位净值")
         c_growth = _pick_cols(df, "日增长率")
         if c_date is None or c_nav is None:
             return None
-        df = df[[c_date, c_nav, c_growth]].dropna().copy() if c_growth else df[[c_date, c_nav]].dropna().copy()
+        df = df[[c_date, c_nav, c_growth]].dropna(subset=[c_date, c_nav]).copy() if c_growth else df[[c_date, c_nav]].dropna(subset=[c_date, c_nav]).copy()
         df.columns = ["date", "nav"] + (["growth"] if c_growth else ["growth"])
         if c_growth is None:
             df["growth"] = float("nan")
-        return df.reset_index(drop=True)
+        df = df.reset_index(drop=True)
+        df["nav_adj"] = df["nav"]  # 默认降级：复权列 = 单位净值
+        try:
+            dfc = self.ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
+            c_cdate = _pick_cols(dfc, "净值日期")
+            c_cum = _pick_cols(dfc, "累计净值")
+            if c_cdate is not None and c_cum is not None and dfc is not None and not dfc.empty:
+                cum = dfc[[c_cdate, c_cum]].dropna().copy()
+                cum.columns = ["date", "cum"]
+                m = pd.merge(df, cum, on="date", how="left")
+                if m["cum"].notna().sum() >= 2:
+                    m["cum"] = m["cum"].ffill()
+                    r = (m["cum"] - m["cum"].shift(1)) / m["nav"].shift(1)
+                    bad = r.abs() > 0.15
+                    if bad.any():
+                        log("[WARN] " + fund_code + " 复权日收益异常 " + str(int(bad.sum())) + " 行(|r|>15%)，回退日增长率")
+                        g = m["growth"] / 100.0
+                        fb = g.where(g.notna(), 0.0)
+                        r = r.where(~bad, fb)
+                    r = r.fillna(0.0)  # 首日/前值缺失 → 0
+                    nav0 = float(m["nav"].iloc[0]) if not pd_isna(m["nav"].iloc[0]) else 1.0
+                    m["nav_adj"] = (1.0 + r).cumprod() * nav0
+                    if m["nav_adj"].notna().sum() >= 2:
+                        df = df.merge(m[["date", "nav_adj"]], on="date", how="left", suffixes=("", "_m"))
+                        df["nav_adj"] = df["nav_adj_m"].fillna(df["nav"])
+                        df = df.drop(columns=["nav_adj_m"])
+        except Exception as e:
+            log("[WARN] " + fund_code + " 累计净值/复权重建失败(" + str(e) + ")，nav_adj 降级为 nav")
+        return df
+
+    def purchase_status_map(self):
+        # 全市场基金申赎状态表（东财 fund_purchase_em，约 2.7 万行，10-30 秒）
+        # 进程内缓存：多客户/多产品只拉一次；失败返回 {}（静默降级，不阻塞）
+        if self._purchase_cache is None:
+            cache = {}
+            try:
+                df = self.ak.fund_purchase_em()
+                if df is not None and not df.empty and "基金代码" in df.columns:
+                    def _s(v):
+                        return "" if v is None or v != v else str(v)
+                    for rec in df.to_dict("records"):
+                        code = str(rec.get("基金代码", "")).strip()
+                        if not code:
+                            continue
+                        ma = rec.get("购买起点")
+                        dl = rec.get("日累计限定金额")
+                        cache[code] = {
+                            "purchase": _s(rec.get("申购状态")),
+                            "redeem": _s(rec.get("赎回状态")),
+                            "min_amount": float(ma) if ma is not None and ma == ma else None,
+                            "daily_limit": float(dl) if dl is not None and dl == dl else None,
+                        }
+            except Exception as e:
+                log("[WARN] 全市场申赎状态拉取失败(" + str(e) + ")，降级为空表")
+            self._purchase_cache = cache
+        return self._purchase_cache
 
     def fund_profile(self, fund_code):
         df = self.ak.fund_individual_basic_info_xq(symbol=fund_code)
@@ -565,6 +624,19 @@ def safe_format(v, fmt="{:+.2f}", suffix="%"):
         return "暂缺"
 
 
+def _ret_col_local(df):
+    # 复权收益列选择：优先 rules.ret_col（规则引擎统一口径，A7 契约），否则本地兜底 nav_adj→nav
+    _rc = getattr(rules, "ret_col", None)
+    if _rc is not None:
+        try:
+            return _rc(df)
+        except Exception:
+            pass
+    if "nav_adj" in df.columns:
+        return df["nav_adj"]
+    return df["nav"]
+
+
 def fetch_once(fn, name):
     try:
         r = fn()
@@ -726,7 +798,9 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map, nav_cache=None):
     fcode = p.get("fund_code", "")
     ctx = {"code": code, "name": name, "type": ptype,
            "platform": p.get("platform", ""), "notes": p.get("notes", ""),
-           "status": p.get("status", "held")}
+           "status": p.get("status", "held"),
+           "manager_since": p.get("manager_since"),
+           "purchase_status": None, "purchase_meta": None}
     if not fcode:
         return ([f"- {code} {name}: 银行理财/券商产品，自动数据不可用（需人工维护）"],
                 {**ctx, "unavailable": True})
@@ -745,7 +819,7 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map, nav_cache=None):
     if nav is None or nav.empty or len(nav) < 30:
         return ([f"- {code} {name}: 净值数据不可用"], {**ctx, "unavailable": True})
 
-    n = nav["nav"]
+    n = _ret_col_local(nav)  # 复权口径（nav_adj，A7）：区间收益/最大回撤均按分红再投资口径
     def rb(days):
         return (n.iloc[-1] / n.iloc[-1 - days] - 1) if len(nav) > days else None
     r1w, r1m, r3m, r6m, r1y = rb(5), rb(21), rb(63), rb(126), rb(250)
@@ -757,6 +831,10 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map, nav_cache=None):
     if stale:
         nav_str += " ⚠️数据滞后"
 
+    ps_map = fetch_once(lambda: fetcher.purchase_status_map(), "申赎状态") or {}
+    if fcode in ps_map:
+        ctx["purchase_status"] = ps_map[fcode].get("purchase")
+        ctx["purchase_meta"] = ps_map[fcode]
     fees = fetch_section(lambda: fetcher.fund_fees(fcode), f"费率{fcode}") or []
     prof_map = {str(k).strip(): str(v).strip() for k, v in profile.items()}
     scale = prof_map.get("基金规模", "")
@@ -1204,6 +1282,27 @@ def _main():
     ctx["bond"] = bond_ctx
     ctx["signal_bond"] = stance_label(bond_sig) if bond_sig is not None else "无数据"
 
+    # ---- rf_annual 无风险利率（score_candidate 输入；三级降级链：y2 → y10-0.4 → 0.015）----
+    # y2/y10 单位均为百分点，需 /100 转小数（如 y2=1.65 → 0.0165）；NaN 检查用 v == v
+    rf_annual = 0.015
+    if bond is not None and not bond.empty:
+        try:
+            last = bond.iloc[-1]
+            y2v = float(last["y2"]) if ("y2" in last.index and last["y2"] == last["y2"]) else float("nan")
+            y10v = float(last["y10"]) if ("y10" in last.index and last["y10"] == last["y10"]) else float("nan")
+            if y2v == y2v:
+                rf_annual = y2v / 100.0
+                log("[INFO] rf_annual 用 2Y: " + str(round(rf_annual, 4)))
+            elif y10v == y10v:
+                rf_annual = (y10v - 0.4) / 100.0
+                log("[INFO] rf_annual 用 10Y-0.4: " + str(round(rf_annual, 4)))
+            else:
+                log("[INFO] rf_annual 无 y2/y10，用默认 0.015")
+        except Exception as e:
+            log("[WARN] rf_annual 计算失败(" + str(e) + ")，用默认 0.015")
+            rf_annual = 0.015
+    ctx["rf_annual"] = rf_annual
+
     # 中证全债指数（组合基准对比用；失败不阻塞，基准字段降级为 None）
     bdf = fetch_once(lambda: fetcher.index_daily("sh000923"), "中证全债")
     if bdf is not None and not bdf.empty and len(bdf) > 60:
@@ -1466,8 +1565,9 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
             product_ctxs.append(pctx)
             nav_s = pctx.get("nav_series")
             if nav_s is not None and len(nav_s) > 30:
+                _rc = _ret_col_local(nav_s)
                 returns_map[p["code"]] = (
-                    nav_s.set_index(pd.to_datetime(nav_s["date"]))["nav"].pct_change().dropna())
+                    _rc.set_axis(pd.to_datetime(nav_s["date"])).pct_change().dropna())
     ctx["products"] = product_ctxs
 
     def render_products(tp_map):
@@ -1603,6 +1703,7 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
              "product_name": {pc["code"]: pc.get("name", pc["code"]) for pc in product_ctxs},
              "tp_ctx": tp_ctx_map,
              "nav": nav_map,
+             "rf_annual": ctx.get("rf_annual"),
              "total": total_mv,
              "product_ctx": pctx_map},
             storm_active=storm_active, storm_reasons=storm_reasons, ep_lock=ep_lock,
@@ -1626,6 +1727,17 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
             for ys in y_sigs:
                 cur = "延续" if any(v.get("code") == ys.get("code") for v in tp_actions.values()) else "未延续"
                 L(f"- 昨日止盈观察：{ys.get('code')}（{ys.get('action')}）｜今日信号：{cur}")
+            try:
+                y_storm = state_store.was_storm_yesterday(client=client_id)
+                if y_storm is not None:
+                    if y_storm and not storm_active:
+                        L(f"- 昨日市场预警（买入冻结）→ 今日已解冻，恢复常规纪律判定")
+                    elif y_storm and storm_active:
+                        L(f"- 昨日市场预警（买入冻结）→ 今日仍未解除，继续持有现金观望")
+                    elif not y_storm and storm_active:
+                        L(f"- 昨日无市场预警 → 今日新触发买入冻结")
+            except Exception:
+                pass
 
         # ---- CRO 叙事 ----
         bond_codes = {p.get("code", "") for p in products if p.get("type") == "bond"}
@@ -1968,6 +2080,8 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
             "pending_cash": state_store.pending_cash(cfg),
             "total_mv": total_mv,
             "tp_signals": [{"code": c, "action": v.get("action")} for c, v in tp_ctx_map.items()],
+            "storm_active": storm_active,
+            "eq_target": eq_target,
         }, client=client_id)
     except Exception as e:
         log(f"[WARN] 状态快照写入失败: {str(e)[:80]}")

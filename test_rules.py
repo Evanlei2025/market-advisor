@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# rules.py core function unit tests (phase 2 gap-fill).
+# rules.py core function unit tests (V3: score_candidate 重构 P0/P1/P2 + build_order_book 硬门槛/换手抑制/rf_annual).
 # Cover: equity_target / ep_threshold / score_candidate / portfolio_diagnostics / build_order_book.
 # Style like test_tp.py: zero external deps, pure asserts, standalone runnable
 # (python test_rules.py; non-zero exit code means failure).
@@ -25,6 +25,7 @@ CFG = {'target': {'equity': {'base': 0.40, 'band': 0.05}, 'cash': {'base': 0.10}
 CFG_NS = {'target': {'equity': {'base': 0.40, 'band': 0.05}, 'cash': {'base': 0.10}},
           'rules': {'take_profit': {'shadow_mode': False, 'min_hold_days': 7},
                     'min_order_amount': 100}}
+TODAY = '2026-08-07'
 
 
 def ids_of(triggers):
@@ -40,6 +41,11 @@ def nav_df(vals):
                         index=pd.date_range('2025-01-01', periods=len(vals), freq='B'))
 
 
+def nav_df2(vals, start='2025-01-01'):
+    return pd.DataFrame({'date': pd.date_range(start, periods=len(vals), freq='B'),
+                         'nav': vals})
+
+
 def nav_trend(n=60):
     return nav_df([1.002 ** i * (1 + 0.0003 * ((i * 7) % 5 - 2)) for i in range(n)])
 
@@ -48,9 +54,45 @@ def nav_flat(n=60):
     return nav_df([1.0 + 0.0002 * ((i * 3) % 5 - 2) for i in range(n)])
 
 
+def nav_mu_vol(mu, vol, n=120, start='2025-01-01'):
+    # 确定性日收益：年化 mu / 年化 vol（噪声模式固定 → 纯确定性）
+    rs = []
+    for i in range(n):
+        noise = (((i * 7) % 5 - 2) / 2.0)
+        rs.append(mu / 250.0 + noise * vol / math.sqrt(250.0))
+    nav = [1.0]
+    for r in rs:
+        nav.append(nav[-1] * (1.0 + r))
+    return nav_df2(nav[1:], start)
+
+
+def nav_smooth(n=120):
+    # 慢正弦日收益 → 一阶自相关 ≈ cos(2π/40) ≈ 0.988 > 0.9（平滑检测用例）
+    rs = [0.001 * math.sin(2 * math.pi * i / 40.0) for i in range(n)]
+    nav = [1.0]
+    for r in rs:
+        nav.append(nav[-1] * (1 + r))
+    return nav_df2(nav[1:])
+
+
+def nav_tiny_vol(n=80):
+    # 波动趋零（年化 σ << 1%）→ σ 下限 0.01 用例
+    return nav_df2([1.0 + ((i * 7) % 5 - 2) * 1e-6 for i in range(n)])
+
+
 def ret_series(n, amp, phase=0.0, start='2025-01-01'):
     return pd.Series([amp * math.sin(2 * math.pi * (i + phase) / 20.0) for i in range(n)],
                      index=pd.date_range(start, periods=n, freq='B'))
+
+
+def full_pctx(nav=None, **kw):
+    p = {'type': 'equity', 'name': 'TestEquity',
+         'nav_series': nav if nav is not None else nav_trend(),
+         'max_dd': '-17.9%', 'scale': '43.53亿',
+         'purchase_status': '开放申购', 'purchase_meta': {'daily_limit': 50000},
+         'fees': '申购0.15%，短期赎回0.5%，管理0.5%'}
+    p.update(kw)
+    return p
 
 
 def bok_ctx(**kw):
@@ -76,6 +118,10 @@ def prods_equity():
 def prods_eq_bond():
     return [{'code': 'E', 'type': 'equity', 'status': 'held', 'name': 'TestEquity'},
             {'code': 'B', 'type': 'bond', 'status': 'held', 'name': 'TestBond'}]
+
+
+def obs(code, **kw):
+    return {'code': code, 'type': 'equity', 'status': 'observe', 'name': code, **kw}
 
 
 def test_equity_target(check):
@@ -144,50 +190,92 @@ def test_ep_threshold(check):
 
 
 def test_score_candidate(check):
-    # G3.1 pctx=None -> None
+    # ================= P0 止血 =================
+    # G3.1 pctx=None -> None；全维度缺失（完整度 0 < 0.8）-> None
     check('G3 pctx=None -> None', rules.score_candidate(None, {}) is None)
-    # G3.2/G3.3 全维度有值: 高夏普 > 平缓，且评分 0-100
-    a = {'nav_series': nav_trend(), 'max_dd': -0.05, 'mgmt_fee': 1.2,
-         'short_redeem_fee': 0.5, 'scale': 50, 'ranking': '近1年 12/500'}
-    b = {'nav_series': nav_flat(), 'max_dd': -0.05, 'mgmt_fee': 1.2,
-         'short_redeem_fee': 0.5, 'scale': 50, 'ranking': '近1年 12/500'}
-    sa, sb = rules.score_candidate(a, {}), rules.score_candidate(b, {})
-    check('G3 全维度评分0-100', sa is not None and 0 < sa <= 100 and sb is not None,
-          'sa=%s sb=%s' % (sa, sb))
-    check('G3 高夏普分更高', sb < sa, 'sa=%s sb=%s' % (sa, sb))
-    # G3.4 部分维度缺失 -> 不抛异常并按剩余权重重归一（max_dd+scale 均满分 -> 100.0）
-    s = rules.score_candidate({'max_dd': -0.1, 'scale': 50}, {})
-    check('G3 部分维度重归一', s == 100.0, 's=%s' % s)
-    # G3.5 全部维度缺失 -> None
-    check('G3 全缺失 -> None', rules.score_candidate({'fees': '无'}, {}) is None
-          and rules.score_candidate({}, {}) is None)
-    # G3.6 最大回撤方向: 回撤深(0.4) 分低 vs 浅(-0.05) 分高
-    s1 = rules.score_candidate({'max_dd': 0.4}, {})
-    s2 = rules.score_candidate({'max_dd': -0.05}, {})
-    check('G3 深度回撤分低', s1 == 60.0 and s2 == 100.0 and s1 < s2, 's1=%s s2=%s' % (s1, s2))
-    # G3.7 实现注记: mdd=-0.5 与 -0.05 都被 1-mdd 剪裁到 1.0 -> 同分
-    s3 = rules.score_candidate({'max_dd': -0.5}, {})
-    check('G3 回撤剪裁同分', s3 == 100.0 and s3 == s2, 's3=%s' % s3)
-    # G3.8 费率: 高费率分低（低者优）
-    sf_hi = rules.score_candidate({'mgmt_fee': 2.5}, {})
-    sf_lo = rules.score_candidate({'mgmt_fee': 1.2}, {})
-    check('G3 高费率分低', approx(sf_hi, 16.67) and approx(sf_lo, 60.0) and sf_hi < sf_lo,
-          'hi=%s lo=%s' % (sf_hi, sf_lo))
-    # G3.9 费率<=1 按小数（0.6 = 60%）-> 0 分
-    s = rules.score_candidate({'mgmt_fee': 0.6}, {})
-    check('G3 费率0.6按60%计0分', s == 0.0, 's=%s' % s)
-    # G3.10 fees 字符串解析（管理费+短期赎回）
-    s = rules.score_candidate({'fees': '管理费1.2%短期赎回0.5%'}, {})
-    check('G3 fees字符串解析', approx(s, 43.33), 's=%s' % s)
-    # G3.11 ranking 字符串解析
-    s = rules.score_candidate({'ranking': '近1年 12/500'}, {})
-    check('G3 ranking字符串', approx(s, 97.6), 's=%s' % s)
-    # G3.12 ranking 数值
-    s = rules.score_candidate({'ranking': 0.9}, {})
-    check('G3 ranking数值', approx(s, 10.0), 's=%s' % s)
-    # G3.13 scale 分段插值: 1000亿 -> 0.4857 -> 48.57
-    s = rules.score_candidate({'scale': 1000}, {})
-    check('G3 scale分段插值', approx(s, 48.57), 's=%s' % s)
+    check('G3 全缺失 -> None', rules.score_candidate({}, {}) is None
+          and rules.score_candidate({'fees': '无'}, {}) is None)
+    # G3.2 rf 生效：同 pctx，rf 越高夏普越低 → 总分越低（nav 需非平滑、σ 未封顶）
+    pa = full_pctx(nav=nav_mu_vol(0.30, 0.20))
+    s_rf0 = rules.score_candidate(pa, CFG, rf_annual=0.0)
+    s_rf5 = rules.score_candidate(pa, CFG, rf_annual=0.05)
+    check('G3 rf生效', s_rf0 is not None and 0 < s_rf5 < s_rf0 <= 100,
+          'rf0=%.2f rf5=%.2f' % (s_rf0, s_rf5))
+    # G3.3 max_dd 解析：-17.9%→0.821；-0.05→0.95；0.4→0.6（abs 防御正数）
+    check('G3 max_dd解析', approx(rules._tail_risk({'max_dd': '-17.9%'}), 0.821)
+          and approx(rules._tail_risk({'max_dd': -0.05}), 0.95)
+          and approx(rules._tail_risk({'max_dd': 0.4}), 0.6))
+    # G3.4 σ 下限：波动趋零（年化 σ<1%）→ 不爆表，alpha 子分 0-1，总分 0-100
+    pt = full_pctx(nav=nav_tiny_vol())
+    a_floor = rules._excess_alpha(pt, CFG, 0.0)
+    s_floor = rules.score_candidate(pt, CFG)
+    check('G3 σ下限不爆表', a_floor is not None and 0.0 <= a_floor <= 1.0
+          and s_floor is not None and 0 <= s_floor <= 100, 'a=%s s=%s' % (a_floor, s_floor))
+    # G3.5 平滑检测：慢正弦日收益自相关≈0.988>0.9 → alpha 中性 0.5（不进正常池）
+    ps = {'nav_series': nav_smooth(), 'type': 'equity', 'name': 'X'}
+    check('G3 平滑检测', rules._excess_alpha(ps, CFG, 0.0) == 0.5)
+    # G3.6 成立<18个月：评分不拦截（硬门槛在 build_order_book 的 cands 过滤处，G5 覆盖）
+    py = full_pctx(inception='2026-03-01')
+    sy = rules.score_candidate(py, CFG)
+    check('G3 成立<18月不进评分拦截', sy is not None and 0 <= sy <= 100, 's=%s' % sy)
+    # ================= P1 结构重构 =================
+    # G3.7 权重表存在且 =100
+    w = rules.candidate_weights()
+    check('G3 权重表=100', sum(w.values()) == 100
+          and w == {'marginal': 20, 'tco': 18, 'alpha': 17,
+                    'tail': 15, 'stability': 15, 'tradability': 15}, 'w=%s' % w)
+    # G3.8 pool 机制：同组百分位生效（差距放大）；无池 → winsorized 原始值
+    A = full_pctx(nav=nav_mu_vol(0.30, 0.20))
+    B = full_pctx(nav=nav_mu_vol(0.05, 0.20))
+    d0 = rules.score_candidate(A, CFG) - rules.score_candidate(B, CFG)
+    rules._set_candidate_pool([A, B])
+    d1 = rules.score_candidate(A, CFG) - rules.score_candidate(B, CFG)
+    rules._clear_candidate_pool()
+    check('G3 pool放大同组差距', d1 > d0 > 0, 'd0=%.2f d1=%.2f' % (d0, d1))
+    # G3.9 组内单样本 → 全维中性 0.5 → 基准分 50（完整度 100 无惩罚）
+    rules._set_candidate_pool([A])
+    s_single = rules.score_candidate(A, CFG)
+    rules._clear_candidate_pool()
+    check('G3 池单样本中性50', approx(s_single, 50.0), 's=%s' % s_single)
+    # G3.10 TCO：高费用 → 低子分；持有年数可配（cfg.rules.candidate_holding_years）
+    t_hi = rules._tco_score({'fees': '申购0.15%，短期赎回0.5%，管理0.5%'}, CFG)
+    t_lo = rules._tco_score({'fees': '申购0.05%，短期赎回0%，管理0.15%'}, CFG)
+    t_y2 = rules._tco_score({'fees': '管理0.5%'}, {})
+    t_y5 = rules._tco_score({'fees': '管理0.5%'}, {'rules': {'candidate_holding_years': 5}})
+    check('G3 TCO高费低分', t_hi < t_lo and approx(t_y2, 0.5) and t_y5 < t_y2,
+          'hi=%s lo=%s y2=%s y5=%s' % (t_hi, t_lo, t_y2, t_y5))
+    # G3.11 边际贡献：与组合其他产品高相关 → 低贡献（top10 同 → 更低）
+    c1 = nav_mu_vol(0.10, 0.20)
+    cand = {'nav_series': c1, 'top10': [{'stock_name': 'A'}, {'stock_name': 'B'}]}
+    o_same = {'nav_series': c1, 'top10': [{'stock_name': 'A'}, {'stock_name': 'B'}]}
+    o_anti = {'nav_series': nav_df2([2.0 - x for x in c1['nav']]),
+              'top10': [{'stock_name': 'C'}, {'stock_name': 'D'}]}
+    rules._set_candidate_pool([], others=[o_same])
+    m_same = rules._marginal_contribution(cand)
+    rules._set_candidate_pool([], others=[o_anti])
+    m_diff = rules._marginal_contribution(cand)
+    rules._clear_candidate_pool()
+    check('G3 边际贡献相关性与top10', m_same < m_diff and approx(m_same, 0.0) and approx(m_diff, 1.0),
+          'same=%s diff=%s' % (m_same, m_diff))
+    # G3.12 惩罚项：尾部风险<0.3 → ×0.6；可交易<0.3 → ×0.6；完整度折扣 0.9+0.1×完整度
+    check('G3 惩罚项与折扣', approx(rules._synthesize(50.0, 0.2, 0.8, 1.0), 30.0)
+          and approx(rules._synthesize(50.0, 0.5, 0.2, 1.0), 30.0)
+          and approx(rules._synthesize(50.0, 0.5, 0.8, 1.0), 50.0)
+          and approx(rules._synthesize(50.0, 0.5, 0.5, 0.8), 49.0))
+    # G3.13 完整度门槛：可用权重 <80% → None（仅 max_dd 一个维度 = 15/100）
+    check('G3 完整度门槛', rules.score_candidate({'max_dd': '-0.1'}, CFG) is None)
+    # G3.14 缺失填充：组内中位数（_group_median 直接验证）
+    gm = rules._group_median('tco', [{'fees': '管理1%'}, {'fees': '管理0.5%'}], CFG, 0.0)
+    check('G3 缺失组中位数填充', approx(gm, 0.25), 'gm=%s' % gm)
+    # ================= P2 贝叶斯收缩 =================
+    # G3.15 收缩：λ=τ²/(τ²+SE²)；own 极端离群 + SE 巨大 → 收缩后百分位 < 未收缩
+    # own=0.30 极端离群且 SE 巨大（年数 0.05）→ 收缩到中位数附近，落至 0.08 成员之下 → 百分位下降
+    raw = [0.05, 0.06, 0.08, 0.30]
+    unshr = rules._rank01(raw, 0.30)
+    pct = rules._shrink_pct(3, raw, [0.5, 0.5, 0.1, 3.0], [10.0, 10.0, 10.0, 0.05])
+    check('G3 收缩拉低离群', pct < unshr and 0.5 <= pct < unshr, 'unshr=%.3f shr=%.3f' % (unshr, pct))
+    # G3.16 组内全同（τ=0）→ 收缩无信息 → 0.5
+    check('G3 全同组中性', rules._shrink_pct(0, [0.1, 0.1], [0.5, 0.5], [1.0, 1.0]) == 0.5)
 
 
 def test_portfolio_diagnostics(check):
@@ -238,7 +326,7 @@ def test_portfolio_diagnostics(check):
 
 
 def test_build_order_book(check):
-    today = '2026-08-07'
+    today = TODAY
     # G5.1 止盈非影子 -> 生成卖出订单（amount=市值1/3，确认/到账日确定）
     ctx = bok_ctx(mvs={'E': 60000}, shares={'E': 60000},
                   lots={'E': [{'buy_date': '2025-01-01', 'shares': 60000}]},
@@ -307,7 +395,6 @@ def test_build_order_book(check):
                                                             cooldown_active=True, today=today)
     check('G5 冷却期冻结买入', orders == [], str(orders))
     check('G5 冷却期摘要行', any('冷却期' in x for x in summary), str(summary))
-
     # G5.9 在途/余额约束: cash_mv=0 且无在途到账 -> 买入受限（金额0不生成）
     ctx = bok_ctx(mvs={'E': 1000}, cash_mv=0, settled_cash=0)
     orders, alloc, summary, tp_act = rules.build_order_book(CFG, prods_equity(), ctx, today=today)
@@ -318,11 +405,11 @@ def test_build_order_book(check):
                                                             bok_ctx(mvs={'E': 1000}, cash_mv=50000),
                                                             today=today)
     check('G5 空产品无操作', orders == [] and tp_act == {}, str(orders))
-    # G5.11 零持仓关注池产品 -> BUY-NEW 建仓（实现：mvs=0 有产品即建仓）
-    obs = [{'code': 'O', 'type': 'equity', 'status': 'observe', 'name': 'Observe'}]
+    # G5.11 零持仓关注池产品 -> BUY-NEW 建仓（pctx 缺失时硬门槛 fail-open）
+    obs1 = [obs('O')]
     ctx = bok_ctx(mvs={'O': 0}, product_name={'O': 'Observe'}, nav={'O': 1.0}, cash_mv=50000,
                   exposure={'O': 0.9})
-    orders, alloc, summary, tp_act = rules.build_order_book(CFG, obs, ctx, today=today)
+    orders, alloc, summary, tp_act = rules.build_order_book(CFG, obs1, ctx, today=today)
     check('G5 关注池建仓BUY-NEW', len(orders) == 1 and orders[0]['rule_id'] == 'BUY-NEW'
           and approx(orders[0]['amount'], 40000.0) and '关注池建仓' in orders[0]['reason'],
           str(orders))
@@ -350,6 +437,73 @@ def test_build_order_book(check):
     # G5.15 target_alloc 恒等
     orders, alloc, summary, tp_act = rules.build_order_book(CFG, [], bok_ctx(), today=today)
     check('G5 target_alloc', alloc == {'equity': 0.4, 'bond': 0.5, 'cash': 0.1}, str(alloc))
+    # G5.16 硬门槛：暂停申购/限大额/成立<18月/规模<2亿 → 剔除；正常候选被买入
+    prods_g = [obs('OK'), obs('P1'), obs('P2'), obs('P3'), obs('P4')]
+    pm_g = {
+        'OK': full_pctx(code='OK'),
+        'P1': full_pctx(code='P1', purchase_status='暂停申购'),
+        'P2': full_pctx(code='P2', purchase_status='限大额'),
+        'P3': full_pctx(code='P3', inception='2026-03-01'),
+        'P4': full_pctx(code='P4', scale='1.2亿'),
+    }
+    ctx_g = bok_ctx(mvs={c: 0 for c in pm_g}, product_name={c: c for c in pm_g},
+                    nav={c: 1.0 for c in pm_g}, exposure={c: 0.9 for c in pm_g},
+                    product_ctx=pm_g)
+    orders, alloc, summary, tp_act = rules.build_order_book(CFG, prods_g, ctx_g, today=today)
+    check('G5 硬门槛剔除', len(orders) == 1 and orders[0]['code'] == 'OK'
+          and orders[0]['rule_id'] == 'BUY-NEW', str(orders))
+    # G5.17 rf_annual 流入排序：买入选 == score_candidate(同 rf、同池) 的最高分
+    rf_pctx = {
+        'E1': full_pctx(code='E1', nav=nav_mu_vol(0.30, 0.50)),
+        'G1': full_pctx(code='G1', nav=nav_mu_vol(0.10, 0.10)),
+    }
+    ctx_rf = bok_ctx(mvs={'E1': 0, 'G1': 0}, product_name={'E1': 'E1', 'G1': 'G1'},
+                     nav={'E1': 1.0, 'G1': 1.0}, exposure={'E1': 0.9, 'G1': 0.9},
+                     product_ctx=rf_pctx, rf_annual=0.10)
+    orders, alloc, summary, tp_act = rules.build_order_book(CFG, [obs('E1'), obs('G1')],
+                                                            ctx_rf, today=today)
+    rules._set_candidate_pool([rf_pctx['E1'], rf_pctx['G1']])
+    s_e1 = rules.score_candidate(rf_pctx['E1'], CFG, rf_annual=0.10)
+    s_g1 = rules.score_candidate(rf_pctx['G1'], CFG, rf_annual=0.10)
+    rules._clear_candidate_pool()
+    want = 'E1' if s_e1 >= s_g1 else 'G1'
+    check('G5 rf生效于排序', len(orders) == 1 and orders[0]['code'] == want,
+          'winner=%s want=%s E1=%.2f G1=%.2f' % (orders and orders[0]['code'], want, s_e1, s_g1))
+    # G5.18 换手抑制：观察候选仅领先 4.5 分（<5）→ 保持原持仓（held +5 缓冲）
+    # 唯一差异维度：管理费（TCO）→ 组内 tco 排序差 = 0.25×18 = 4.5 < 5；
+    # 短期赎回统一 0%（否则可交易性维度制造 11 分差距）；日期错开 → 边际相关性缺失 → 各 0.5 中性
+    navh = nav_mu_vol(0.15, 0.25)
+    navh_off = nav_mu_vol(0.15, 0.25, start='2024-01-01')
+    pm_h = {
+        'E': full_pctx(code='E', name='EqE', nav=navh, fees='管理0.3%，短期赎回0%，申购0%'),
+        'O': full_pctx(code='O', name='EqO', nav=navh_off, fees='管理0.1%，短期赎回0%，申购0%'),
+        'O2': full_pctx(code='O2', name='EqO2', nav=navh_off, fees='管理0.5%，短期赎回0%，申购0%'),
+        'O3': full_pctx(code='O3', name='EqO3', nav=navh_off, fees='管理0.8%，短期赎回0%，申购0%'),
+    }
+    prods_h = [{'code': 'E', 'type': 'equity', 'status': 'held', 'name': 'EqE'},
+               obs('O', name='EqO'), obs('O2', name='EqO2'), obs('O3', name='EqO3')]
+    ctx_h = bok_ctx(mvs={c: 0 for c in pm_h}, product_name={c: c for c in pm_h},
+                    nav={c: 1.0 for c in pm_h}, exposure={c: 0.9 for c in pm_h},
+                    product_ctx=pm_h)
+    orders, alloc, summary, tp_act = rules.build_order_book(CFG, prods_h, ctx_h, today=today)
+    rules._set_candidate_pool([pm_h[c] for c in ('E', 'O', 'O2', 'O3')])
+    s_held = rules.score_candidate(pm_h['E'], CFG)
+    s_obs = rules.score_candidate(pm_h['O'], CFG)
+    rules._clear_candidate_pool()
+    check('G5 换手抑制held优先', len(orders) == 1 and orders[0]['code'] == 'E'
+          and 0 < s_obs - s_held < 5.0,
+          'winner=%s sE=%.2f sO=%.2f' % (orders and orders[0]['code'], s_held, s_obs))
+    # G5.19 已持有产品被硬门槛剔除 -> 观察候选接替买入
+    pm_h2 = {'E': full_pctx(code='E', purchase_status='暂停申购'),
+             'O': full_pctx(code='O')}
+    prods_h2 = [{'code': 'E', 'type': 'equity', 'status': 'held', 'name': 'EqE'},
+                obs('O')]
+    ctx_h2 = bok_ctx(mvs={'E': 0, 'O': 0}, product_name={'E': 'EqE', 'O': 'O'},
+                     nav={'E': 1.0, 'O': 1.0}, exposure={'E': 0.9, 'O': 0.9},
+                     product_ctx=pm_h2)
+    orders, alloc, summary, tp_act = rules.build_order_book(CFG, prods_h2, ctx_h2, today=today)
+    check('G5 已持受限换观察买入', len(orders) == 1 and orders[0]['code'] == 'O'
+          and orders[0]['rule_id'] == 'BUY-NEW', str(orders))
 
 
 def run():

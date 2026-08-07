@@ -185,8 +185,6 @@ def _norm_date_str(v):
     except Exception:
         return None
 
-
-
 DEFAULT_CLIENT = 'Evan_Lei'
 
 # 客户改名登记表：历史名称 → 当前名称。客户改名时在此登记；
@@ -207,7 +205,6 @@ def _client_of(entry, client):
     if client is None:
         return True
     return _norm_client(entry) == client
-
 
 
 # ---------------- 留痕表（止盈信号/算法偏差） ----------------
@@ -406,6 +403,102 @@ def get_feedback(client=None, limit=1):
         return []
 
 
+# ---------------- 经理快照（manager_snapshots，state.json 内） ----------------
+# 候选评分「经理任期维度」数据层：免费源只有经理名字符串（如「马芳 姚加红」）无任职日期，
+# 经理变更侦测自己攒任期：每次跑批按 code 存快照，字符串变化那天 = 新任期起点，之后自然累积。
+# 冷启动无历史 → 调用方三态处理（已知≥12月不惩罚 / 已知<12月×0.85 / 未知×0.95+标签）。
+MANAGER_SNAPSHOT_MAX = 200
+
+
+def record_manager_snapshot(code, manager_str, client=None, when=None):
+    '经理变更侦测快照：manager 为空/None → 只更新 last_seen 不动 since；code 无历史 → since_date=今天（when 缺省）；已有历史且 manager 变化 → since_date=今天（新任期起点）+ 更新 manager；相同 → 仅刷 last_seen。key 直接用 code（经理是基金属性不是客户属性，多客户共用快照），写入时记录 client 便于审计。'
+    try:
+        code = str(code or '').strip()
+        if not code:
+            return
+        if when:
+            try:
+                d = date.fromisoformat(str(when)[:10])
+                when_str = d.isoformat()
+            except Exception:
+                when_str = date.today().isoformat()
+        else:
+            when_str = date.today().isoformat()
+        mgr = str(manager_str or '').strip()
+        st = load_state()
+        snaps = st.get('manager_snapshots')
+        if not isinstance(snaps, dict):
+            snaps = {}
+        cl = _norm_client({'client': client})
+        prev = snaps.get(code)
+        if isinstance(prev, dict) and prev.get('since_date') and _is_iso_date(str(prev.get('since_date'))[:10]):
+            old_mgr = str(prev.get('manager', '') or '').strip()
+            if mgr and mgr != old_mgr:
+                prev['manager'] = mgr
+                prev['since_date'] = when_str
+            elif mgr:
+                prev['manager'] = mgr
+            prev['last_seen'] = when_str
+            prev['client'] = cl
+            snaps[code] = prev
+        else:
+            snaps[code] = {'manager': mgr, 'since_date': when_str,
+                           'last_seen': when_str, 'client': cl}
+        if len(snaps) > MANAGER_SNAPSHOT_MAX:
+            items = sorted(snaps.items(),
+                           key=lambda kv: (str(kv[1].get('last_seen', '')) if isinstance(kv[1], dict) else '', kv[0]),
+                           reverse=True)
+            snaps = dict(items[:MANAGER_SNAPSHOT_MAX])
+        st['manager_snapshots'] = snaps
+        save_state(st)
+        log_state('[MGR] snapshot ' + code + ': ' + (mgr or '<empty>'))
+    except Exception as e:
+        log_state('[WARN] manager snapshot failed: ' + str(e))
+
+
+def manager_snapshot(code):
+    '读取经理快照 {manager, since_date, last_seen}；manager_snapshots 缺失/损坏/无记录/since_date 非法/manager 为空（从未见过经理名，等同未知）→ None。'
+    try:
+        code = str(code or '').strip()
+        if not code:
+            return None
+        snaps = load_state().get('manager_snapshots')
+        if not isinstance(snaps, dict):
+            return None
+        cur = snaps.get(code)
+        if not isinstance(cur, dict):
+            return None
+        mgr = str(cur.get('manager', '') or '').strip()
+        since = str(cur.get('since_date', '') or '')[:10]
+        seen = str(cur.get('last_seen', '') or '')[:10]
+        if not mgr or not _is_iso_date(since):
+            return None
+        return {'manager': mgr, 'since_date': since, 'last_seen': seen}
+    except Exception:
+        return None
+
+
+def manager_tenure_days(code, config_since=None):
+    '现任经理任职天数（int）：config_since（config products.manager_since，YYYY-MM-DD）非空且为合法日期 → 用它算（人工维护优先）；否则用快照 since_date 算；都无 → None（三态判定用：已知≥12月不惩罚 / 已知<12月×0.85 / 未知×0.95+标签）。config_since 非法日期 → 回退快照；异常全部返回 None。'
+    try:
+        code = str(code or '').strip()
+        if not code:
+            return None
+        since = None
+        cs = str(config_since or '').strip()[:10]
+        if cs and _is_iso_date(cs):
+            since = date.fromisoformat(cs)
+        else:
+            snap = manager_snapshot(code)
+            if snap:
+                since = date.fromisoformat(snap['since_date'])
+        if since is None:
+            return None
+        return max(0, (date.today() - since).days)
+    except Exception:
+        return None
+
+
 def shadow_stats(cfg, client=None):
     '影子模式进度统计（3.5）。起始日优先级：cfg.rules.take_profit.shadow_mode_started_date → cfg.shadow_mode_started_date → traces.json 最早 trace 的 signal_date → None。返回 {start, days, signals, products}；signals/products 按 client 过滤（client=None 不过滤；旧条目按 Evan_Lei）。'
     start = (cfg.get('rules', {}).get('take_profit', {}).get('shadow_mode_started_date')
@@ -436,12 +529,10 @@ def shadow_stats(cfg, client=None):
                 codes.add(code)
     return {'start': start, 'days': days, 'signals': n, 'products': len(codes)}
 
-
 shadow_mode_stats = shadow_stats  # 兼容升级指令书 3.5 中 shadow_mode_stats() 的等价别名
 
 
 # ---------------- 推荐日志（近一月推荐次数：用户"次数暗示"需求） ----------------
-
 
 REC_PATH = os.path.join(KB_DIR, "recommendations.json")
 
