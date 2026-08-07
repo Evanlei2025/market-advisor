@@ -98,6 +98,15 @@
     "pending_cash": [],
     "total_mv": 0.0,
     "tp_signals": [],
+    "client": "Jing_Wang"
+  },
+  {
+    "date": "2026-08-07",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
     "client": "NULL_Xue"
   }
 ]

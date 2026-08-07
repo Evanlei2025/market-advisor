@@ -25,8 +25,8 @@ def run():
 
     cfg = json.load(open("config.json", encoding="utf-8"))
     clients = main.get_clients(cfg)
-    check("三客户解析", len(clients) == 3, f"n={len(clients)}")
-    check("客户ID顺序", [c["id"] for c in clients] == ["Evan_Lei", "Harley_Lei", "NULL_Xue"],
+    check("四客户解析", len(clients) == 4, f"n={len(clients)}")
+    check("客户ID顺序", [c["id"] for c in clients] == ["Evan_Lei", "Harley_Lei", "NULL_Xue", "Jing_Wang"],
           str([c["id"] for c in clients]))
 
     evan = clients[0]["cfg"]
@@ -39,13 +39,27 @@ def run():
     check("Evan 观察池保留", any(p.get("status") == "observe" for p in evan.get("products", [])))
 
     harley = clients[1]["cfg"]
-    check("Harley 无 products", len(harley.get("products", [])) == 0)
+    check("Harley 关注池=2", len(harley.get("products", [])) == 2
+          and {p.get("code") for p in harley.get("products", [])} == {"001480", "675123"},
+          str([p.get("code") for p in harley.get("products", [])]))
     check("Harley 仅现金持仓", len(harley.get("holdings", [])) == 1
           and harley["holdings"][0]["type"] == "cash")
     check("Harley 无 tier_gap 覆盖", "tier_gap" not in harley.get("rules", {}).get("take_profit", {}))
     check("Harley 继承全局规则参数", harley.get("rules", {}).get("take_profit", {}).get("base", {}).get("equity") == 0.18)
     check("Harley 继承默认 target", harley.get("target", {}).get("equity", {}).get("base") == 0.4)
     check("Harley 继承 push", bool(harley.get("push", {}).get("serverchan_key")))
+
+    nx = clients[2]["cfg"]
+    check("NULL_Xue 关注池=4", len(nx.get("products", [])) == 4
+          and {p.get("code") for p in nx.get("products", [])} == {"025687", "006195", "016347", "022720"},
+          str([p.get("code") for p in nx.get("products", [])]))
+    check("NULL_Xue 仅现金持仓", len(nx.get("holdings", [])) == 1
+          and nx["holdings"][0]["type"] == "cash")
+
+    jing = clients[3]["cfg"]
+    check("Jing_Wang 空壳", len(jing.get("products", [])) == 0
+          and len(jing.get("holdings", [])) == 1
+          and jing["holdings"][0]["type"] == "cash")
 
     base = {"a": {"x": 1, "y": 2}, "l": [1, 2]}
     over = {"a": {"y": 3}, "l": [9]}

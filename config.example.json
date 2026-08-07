@@ -217,7 +217,28 @@
         "name": "Harley_Lei 客户组合",
         "follow_units": 1
       },
-      "products": [],
+      "products": [
+        {
+          "code": "001480",
+          "name": "财通成长优选混合A",
+          "type": "mixed",
+          "fund_code": "001480",
+          "platform": "",
+          "status": "observe",
+          "bench_index": "",
+          "notes": "关注中，持仓待确认"
+        },
+        {
+          "code": "675123",
+          "name": "西部利得汇逸债券C",
+          "type": "bond",
+          "fund_code": "675123",
+          "platform": "",
+          "status": "observe",
+          "bench_index": "",
+          "notes": "关注中，持仓待确认"
+        }
+      ],
       "holdings": [
         {
           "name": "货币基金/现金",
@@ -232,6 +253,64 @@
       "display_name": "NULL_Xue",
       "portfolio": {
         "name": "NULL_Xue 客户组合",
+        "follow_units": 1
+      },
+      "products": [
+        {
+          "code": "025687",
+          "name": "国泰半导体制造精选混合发起C",
+          "type": "equity",
+          "fund_code": "025687",
+          "platform": "",
+          "status": "observe",
+          "bench_index": "",
+          "notes": "关注中，持仓待确认"
+        },
+        {
+          "code": "006195",
+          "name": "国金量化多因子股票A",
+          "type": "equity",
+          "fund_code": "006195",
+          "platform": "",
+          "status": "observe",
+          "bench_index": "csi500",
+          "notes": "关注中，持仓待确认"
+        },
+        {
+          "code": "016347",
+          "name": "招商中证煤炭等权指数(LOF)E",
+          "type": "equity",
+          "fund_code": "016347",
+          "platform": "",
+          "status": "observe",
+          "bench_index": "",
+          "notes": "关注中，持仓待确认"
+        },
+        {
+          "code": "022720",
+          "name": "广发中证国新港股通央企红利ETF发起式联接C",
+          "type": "equity",
+          "fund_code": "022720",
+          "platform": "",
+          "status": "observe",
+          "bench_index": "",
+          "notes": "关注中，持仓待确认"
+        }
+      ],
+      "holdings": [
+        {
+          "name": "货币基金/现金",
+          "type": "cash",
+          "amount": 0,
+          "yield_pct": 1.6
+        }
+      ],
+      "transactions": []
+    },
+    "Jing_Wang": {
+      "display_name": "Jing_Wang",
+      "portfolio": {
+        "name": "Jing_Wang 客户组合",
         "follow_units": 1
       },
       "products": [],
