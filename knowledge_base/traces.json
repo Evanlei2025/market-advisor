@@ -103,5 +103,23 @@
     "action": "tp_dd",
     "shadow": true,
     "client": "Evan_Lei"
+  },
+  {
+    "T_eff": 0.2135,
+    "T_pre": 0.2728,
+    "T_cap": 0.2135,
+    "v_bench": 0.8045083560046639,
+    "factors": {
+      "F_vol": 1.35,
+      "F_hold": 1.134,
+      "F_sector": 0.9901
+    },
+    "signal_date": "2026-08-07",
+    "execute_date": "",
+    "fee_net_return": 0.0879,
+    "code": "006195",
+    "action": "tp_dd",
+    "shadow": true,
+    "client": "Evan_Lei"
   }
 ]
