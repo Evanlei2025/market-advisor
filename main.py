@@ -21,7 +21,6 @@ import narrative
 import news_alert
 import rules
 import state_store
-import style
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")

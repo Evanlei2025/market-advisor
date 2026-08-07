@@ -61,9 +61,33 @@
 - 客户：Evan_Lei（006195/014846/003504 关注池+真实持仓）；Harley_Lei（关注 001480/675123，已配 SendKey）；NULL_Xue（关注 025687/006195/016347/022720）；Echo_Wang（空壳，已配 SendKey）——持仓/平台未知，长期留空
 - AI 综述/方向倾向板块：本地无 DEEPSEEK_API_KEY 时跳过（fallback 复读 CRO 叙事文本），云端 Actions 带 key 正常生成——云端首跑时验证 summary 板块与方向倾向句
 
+## 技术治理（2026-08-07）
+
+### 已完成 ✅
+- **数据去重（P0）**：record_trace 写入前按 (signal_date,code,action,client) 查重（存在则原位更新）；kb_read_traces/kb_read_state_history **读取层去重**（同键保留最后一条，防跨 git 并发合并残留——根因是云端/本地多次运行 + 无条件追加 + git 数组合并，非多客户循环）；存量清理 traces 7→2 条、state_history 7→5 条（删除改名遗留 Jing_Wang 条目）；_norm_client 新增显式改名映射表 `CLIENT_ALIASES={"Jing_Wang":"Echo_Wang"}`（未来改名在此登记，不做"未知归并 Evan"避免污染统计）
+- **测试补缺（P1）**：test_rules.py 68/68（equity_target 15 场景+ep_threshold 9+score_candidate 13+portfolio_diagnostics 8+build_order_book 23，零网络，akshare 日历用假实现替换）；test_gatekeeper.py 23/23（Au99.99 放行/编造数字拦截/黑名单含 V3 预测软化词/ID 白名单/方向倾向放行/>30% 闸门/30% 边界精确判定）
+- **代码整洁（P1）**：style.py 确认废弃（其 `## 标题→**标题**` 转换会破坏 split_blocks/html_render/build_compact），main.py 删除 `import style`，文件头加废弃注释；requirements.txt 锁定 `requests>=2.31,<3.0`、`pandas>=2.0,<3.0`
+- **config 密钥核验（1.3）**：config.json 已在 .gitignore（含中文注释说明）、git ls-files 仅 config.example.json、example 密钥全为占位符——已达标无需改动
+
+### 测试发现待修点（本轮未修，记账）
+- `build_order_book` 中 `pending_lines` 生成后未追加进 summary_lines（死代码，pending_cash 不影响输出）
+- `add_trading_days` 的 akshare 失败回退 `str + timedelta` 会 TypeError（测试用假实现规避，生产路径 akshare 正常时不会触发）
+- `portfolio_diagnostics` 的 `products` 参数实际未使用
+- 费率解析口径：`v>1.0 → v/100`（百分数），`v≤1.0 → 原值`（小数）——配置 0.5 会被解析为 50%
+- score_candidate 的 max_dd 剪裁 `max(0,min(1,1-mdd))`：正负大回撤同分（-0.5 与 -0.05 均 100 分）
+
+### main.py 拆分方案（P2，已存档待执行）
+- 现状 1909 行；目标 ≤800 行。建议顺序（每次拆一个模块、拆完跑全部测试、只移代码不改逻辑）：
+  1. `data_fetcher.py`：DataFetcher 类 + fetch_section/fetch_once/_mark_fetch/fetch_once 工具
+  2. `push.py`：push_serverchan/push_wecom/post_with_retry
+  3. `config_loader.py`：load_config/get_clients/deep_merge
+  4. `run_client` 拆三段：_analyze_phase/_narrative_phase/_report_phase
+- **注意**：拆分需同步更新 `.opencode/agents/` 中各子 agent 的职责描述（data-fetcher 等提示词引用 main.py 路径）；run_client 600 行拆分时先画数据流图再动
+
 ## 待办（下一步）🔜
 
-- [ ] 云端四客户版首跑验证（更新 Secret ADVISOR_CONFIG 后触发）：微信四条推送（Harley/Echo 独立接收）+ Pages 客户入口页四链接 + **AI 综述板块与方向倾向句实测**
+- [ ] 云端四客户版首跑验证（更新 Secret ADVISOR_CONFIG 后触发）：微信四条推送（Harley/Echo 独立接收）+ Pages 客户入口页四链接 + **AI 综述板块与方向倾向句实测**（验证清单：summary ≥2 快照数值因果链/跨市场/新闻传导/方向倾向三选一 ≤180 字；产品解读风险/背离/传导 ≥2 项；不复读 CRO；compact ≤3700 字节）
+- [ ] 技术治理记账项修复（见上"测试发现待修点"）
 - [ ] 向 NULL_Xue 发送 docs/CLIENT_ONBOARDING.md，索要 Server酱 SendKey；收到后配 per-client push 并更新 Secret
 - [ ] 客户持仓信息到位后：填 holdings，按各自风险偏好设 target（出厂默认起步，非 Evan 调优值）
 - [ ] 用户确认 GitHub Secret SERVERCHAN_KEY 已添加（Actions 失败通知用）

@@ -189,12 +189,17 @@ def _norm_date_str(v):
 
 DEFAULT_CLIENT = 'Evan_Lei'
 
+# 客户改名登记表：历史名称 → 当前名称。客户改名时在此登记；
+# 仅读取层归一（历史条目读取时视同新客户），不改写历史文件。
+CLIENT_ALIASES = {'Jing_Wang': 'Echo_Wang'}
+
 
 def _norm_client(entry):
-    '条目所属客户：无 client 字段的旧条目一律视为 Evan_Lei（读取兼容，不改写历史文件）。'
+    '条目所属客户：无 client 字段的旧条目一律视为 Evan_Lei；有 client 字段先查改名映射表归一（读取兼容，不改写历史文件）。'
     if not isinstance(entry, dict):
         return DEFAULT_CLIENT
-    return str(entry.get('client') or DEFAULT_CLIENT)
+    raw = str(entry.get('client') or DEFAULT_CLIENT)
+    return CLIENT_ALIASES.get(raw, raw)
 
 
 def _client_of(entry, client):
@@ -206,16 +211,53 @@ def _client_of(entry, client):
 
 
 # ---------------- 留痕表（止盈信号/算法偏差） ----------------
-TRACES_PATH = os.path.join(KB_DIR, "traces.json")
+TRACES_PATH = os.path.join(KB_DIR, 'traces.json')
+
+
+def _trace_dedup_key(t):
+    '留痕去重键 (signal_date, code, action, client)，client 经 _norm_client 归一；字段缺失/异常 → None（不可去重，绝不误并）。'
+    try:
+        if not isinstance(t, dict):
+            return None
+        sd = str(t.get('signal_date', ''))[:10].strip()
+        code = str(t.get('code', '')).strip()
+        act = str(t.get('action', '')).strip()
+        if not sd or not code or not act:
+            return None
+        return (sd, code, act, _norm_client(t))
+    except Exception:
+        return None
+
+
+def _dedup_traces(traces):
+    '读取层归一：同去重键保留最后一条（按遍历顺序覆盖，后见覆盖前见；防跨 git 并发合并残留）。'
+    try:
+        out = []
+        pos = {}
+        for t in traces:
+            k = _trace_dedup_key(t)
+            if k is None:
+                out.append(t)
+                continue
+            if k in pos:
+                out[pos[k]] = t
+            else:
+                pos[k] = len(out)
+                out.append(t)
+        return out
+    except Exception:
+        return traces
 
 
 def kb_read_traces():
-    """读取留痕表（升序 list）；缺失返回 []"""
+    '读取留痕表（升序 list）；缺失返回 []。读取层按 (signal_date, code, action, client) 去重归一：同键保留最后一条（list 升序，最后=最新；防跨 git 并发合并残留）。'
     try:
         if os.path.exists(TRACES_PATH):
-            with open(TRACES_PATH, encoding="utf-8") as f:
+            with open(TRACES_PATH, encoding='utf-8') as f:
                 data = json.load(f)
-                return data if isinstance(data, list) else []
+                if not isinstance(data, list):
+                    return []
+                return _dedup_traces(data)
     except Exception:
         pass
     return []
@@ -305,16 +347,26 @@ def tp_streak_days(code, client=None):
 
 
 def record_trace(entry, client=None):
-    '留痕七字段：{T_eff, T_pre, v_bench, 因子值, 信号日, 执行日, 费后净收益} 写入 knowledge_base/traces.json（追加）。新条目带 client 字段（None 时按 Evan_Lei）。'
+    '留痕七字段：{T_eff, T_pre, v_bench, 因子值, 信号日, 执行日, 费后净收益} 写入 knowledge_base/traces.json。按去重键 (signal_date, code, action, client) 判重：已存在 → 原位更新（合并字段刷新，保留原条目位置）；不存在 → 追加；键字段缺失 → 直接追加（绝不误并）。新条目带 client 字段（None 时按 Evan_Lei）。'
     try:
         os.makedirs(KB_DIR, exist_ok=True)
         data = kb_read_traces()
         if isinstance(entry, dict):
             entry['client'] = client or DEFAULT_CLIENT
-        data.append(entry)
+        key = _trace_dedup_key(entry) if isinstance(entry, dict) else None
+        updated = False
+        if key is not None:
+            for i, t in enumerate(data):
+                if _trace_dedup_key(t) == key:
+                    data[i] = entry
+                    updated = True
+                    break
+        if not updated:
+            data.append(entry)
         with open(TRACES_PATH, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        log_state('[TRACE] 已记录: ' + str(entry.get('code', '?')) + ' T_eff=' + str(entry.get('T_eff')))
+        mode = '（原位更新）' if updated else ''
+        log_state('[TRACE] 已记录: ' + str(entry.get('code', '?')) + ' T_eff=' + str(entry.get('T_eff')) + mode)
     except Exception as e:
         log_state('[WARN] 留痕失败: ' + str(e))
 
@@ -494,12 +546,30 @@ STATE_HISTORY_KEEP = 60
 
 
 def kb_read_state_history():
-    """读取每日状态快照历史（按 date 升序）；缺失/损坏返回 []"""
+    '读取每日状态快照历史（按 date 升序）；缺失/损坏返回 []。读取层按 (date, _norm_client) 去重归一：同键保留最后一条（按遍历顺序覆盖，后见覆盖前见；防跨 git 并发合并残留；client 经 _norm_client 归一）。'
     try:
         if os.path.exists(STATE_HISTORY_PATH):
             with open(STATE_HISTORY_PATH, encoding='utf-8') as f:
                 data = json.load(f)
-                return data if isinstance(data, list) else []
+                if not isinstance(data, list):
+                    return []
+                out = []
+                pos = {}
+                for e in data:
+                    if not isinstance(e, dict):
+                        out.append(e)
+                        continue
+                    dkey = str(e.get('date', ''))
+                    if not dkey:
+                        out.append(e)
+                        continue
+                    k = (dkey, _norm_client(e))
+                    if k in pos:
+                        out[pos[k]] = e
+                    else:
+                        pos[k] = len(out)
+                        out.append(e)
+                return out
     except Exception:
         pass
     return []
