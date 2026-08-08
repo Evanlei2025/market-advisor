@@ -458,7 +458,7 @@ def take_profit_signal(cfg, pctx, ctx):
 
 # ---------------- 订单簿（市值口径 + 关注池 + 余额约束 + 在途/冷却） ----------------
 def add_trading_days(start_date, n):
-    """日期 + n 个交易日（akshare 日历；失败按自然日）。"""
+    """日期 + n 个交易日（akshare 日历；失败按自然日近似）。"""
     from datetime import timedelta
     try:
         import akshare as ak
@@ -474,7 +474,11 @@ def add_trading_days(start_date, n):
             return cal[idx]
     except Exception:
         pass
-    return (start_date + timedelta(days=int(n * 1.5))).isoformat()
+    try:
+        base = date.fromisoformat(str(start_date)[:10])
+        return (base + timedelta(days=int(n * 1.5))).isoformat()
+    except Exception:
+        return str(start_date)
 
 
 def settlement_of(cfg, product):
@@ -515,6 +519,7 @@ _THEME_WORDS = ('半导体', '医药', '医疗', '消费', '红利', '煤炭', '
                 '食品', '保险', '计算机', '芯片', '科创', '中概', '高端装备', '智能')
 _candidate_pool = []      # 本轮候选 pctx 列表（build_order_book 过滤后设置；用后清理）
 _candidate_others = []    # 组合内其他产品 pctx 列表（边际贡献用）
+_candidate_monitor = []   # B2 评分监控条目；emit 后清空，仅观测不参与打分
 
 
 def candidate_weights():
@@ -526,16 +531,46 @@ def _set_candidate_pool(pool, others=None):
     """设置本轮候选池（build_order_book 在 cands 排序前调用；score_candidate 从中取同组样本。）
     pool: list[pctx]（已过滤候选）；others: list[pctx]（组合其他产品，边际贡献用）。
     模块级全局（单线程主流程；调用方须在结束后调用 _clear_candidate_pool）。"""
-    global _candidate_pool, _candidate_others
+    global _candidate_pool, _candidate_others, _candidate_monitor
     _candidate_pool = [p for p in (pool or []) if isinstance(p, dict)]
     _candidate_others = [p for p in (others or []) if isinstance(p, dict)]
-
-
+    _candidate_monitor = []   # 新评分会话：清空上一轮监控条目
 def _clear_candidate_pool():
-    global _candidate_pool, _candidate_others
+    global _candidate_pool, _candidate_others, _candidate_monitor
     _candidate_pool = []
     _candidate_others = []
+    _candidate_monitor = []
 
+
+def _emit_candidate_monitor(pool_n):
+    """B2 评分监控埋点：pool 内各维度 饱和率（子分=0 或 =1 占比）/缺失率（raw None 占比）
+    + 全部候选分；一条结构化行。某维度饱和率 >30% → 追加 ⚠️SAT 告警（维度失效）。
+    由 build_order_book 在 cands 评分循环（sort）结束后调用一次；仅观测不参与打分。"""
+    try:
+        entries = _candidate_monitor
+        if not entries:
+            return
+        dims = [d for d, _, _ in _CAND_DIMS]
+        n = float(len(entries))
+        sat = {d: sum(1 for e in entries
+                      if e['subs'].get(d) is not None and e['subs'][d] in (0.0, 1.0)) / n for d in dims}
+        miss = {d: sum(1 for e in entries if e['raw'].get(d) is None) / n for d in dims}
+        groups = {}
+        for e in entries:
+            g = e['group']
+            groups[g] = groups.get(g, 0) + 1
+        gs = '\'%s\'' % next(iter(groups)) if len(groups) == 1 else str(groups)
+        flags = ','.join(d for d in dims if sat[d] > 0.30)
+        scores = [round(e['score'], 2) for e in entries]
+        print('[candidate_monitor] pool=%d group=%s sat={%s} missing={%s} scores=%s%s'
+              % (pool_n, gs,
+                 ','.join('%s:%.2f' % (d, sat[d]) for d in dims),
+                 ','.join('%s:%.2f' % (d, miss[d]) for d in dims),
+                 scores, (' ' + '\u26a0\ufe0fSAT:' + flags) if flags else ''))
+    except Exception:
+        pass
+    finally:
+        _candidate_monitor.clear()
 
 def _peer_group(pctx):
     """同类分组键：f"组合：大类"。大类 = type（equity/mixed/bond/gold/other）；
@@ -1060,13 +1095,15 @@ def score_candidate(pctx, cfg, rf_annual=None):
     weighted = sum(w * subs[dim] for dim, w, _ in _CAND_DIMS)
     base = 100.0 * weighted / total_w if total_w > 0 else 0.0
     score = _synthesize(base, subs.get('tail'), subs.get('tradability'), completeness)
-    # ---- P2 埋点：饱和率/缺失率（一条汇总行，仅观测不参与打分） ----
+    # ---- B2 埋点：收集条目（pool 评分循环结束由 _emit_candidate_monitor 统一输出一行） ----
     try:
-        sat = sum(1 for d, _, _ in _CAND_DIMS if subs.get(d) is not None and subs[d] in (0.0, 1.0))
-        miss = sum(1 for v in own.values() if v is None)
-        print('[rules] candidate_scores: code=%s pool=%d grp=%s avail=%d/6 sat=%d/6 miss=%d/6 score=%.2f'
-              % (str(pctx.get('code') or '?'), len(_candidate_pool), gk,
-                 sum(1 for v in own.values() if v is not None), sat, miss, score))
+        _candidate_monitor.append({
+            'code': str(pctx.get('code') or '?'),
+            'group': gk,
+            'subs': {d: subs.get(d) for d, _, _ in _CAND_DIMS},
+            'raw': {d: own.get(d) for d, _, _ in _CAND_DIMS},
+            'score': score,
+        })
     except Exception:
         pass
     return score
@@ -1234,6 +1271,7 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
                      if isinstance(pc, dict) and pc.get('status') == 'held'])
                 try:
                     cands.sort(key=_buy_key)
+                    _emit_candidate_monitor(len(cands))  # B2：评分循环结束输出一条监控行
                     if cands:
                         code = cands[0]['code']
                         amt = round(min(eq_gap, max(0.0, cash_now - cash_target_amt)), 2)
@@ -1265,12 +1303,6 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
                                    "stop": False, "rule_id": "BUY-NEW" if remaining.get(code, 0) <= 0 else "REB-BOND"})
                     cash_now -= amt
                     remaining[code] = remaining.get(code, 0) + amt
-
-    # 资金时间线（在途/挂起提示）
-    pending_lines = []
-    for pc in ctx.get("pending_cash", []) or []:
-        sd = str(pc.get("settle_date", ""))[:10]
-        pending_lines.append(f"- 在途资金：{pc.get('code')} 赎回 {pc.get('shares', 0)} 份，预计 {sd or '待确认'} 到账")
 
     summary_lines = []
     for p in products:
@@ -1382,7 +1414,7 @@ def hold_metrics(holdings, nav_series_map, nav_latest_map, cost_map=None):
     return out
 
 
-def portfolio_diagnostics(cfg, products, ctx):
+def portfolio_diagnostics(cfg, ctx):
     """组合诊断：年化波动率 / 250日最大回撤 / VaR95 / 实际权益暴露度。
     5.1：可选基准对比（bench_returns/bench_weights）→ excess_ann/alpha/beta/ir；
     基准缺失或对齐样本 <60 时这些字段为 None，不影响既有字段。"""

@@ -89,6 +89,15 @@
 - **数据源新增**：累计净值走势（复权）、fund_purchase_em 申购状态（全市场表进程内缓存 9.4s/次）、雪球基础信息（成立时间/最新规模/经理名/类型）
 - **验证**：test_rules 76/76（G3 24 条含 rf 生效/解析/收缩/门槛 + G5 23 条含四门槛剔除/换手抑制）、四测试全绿；端到端四客户通过；V3.1 自下一个交易日云端 cron 生效
 
+### 迭代四：清理 + IC 回测框架（2026-08-08）
+- **记账项 3 项修复**：build_order_book 的 pending_lines 死代码删除（main.py 已有在途资金提醒，避免推送重复字节）；add_trading_days 回退 TypeError 修复（str→date 转换后 +timedelta）；portfolio_diagnostics 删未用 products 参数（签名+调用处+test_rules 7 处同步）
+- **record_feedback.py CLI**：`python record_feedback.py <client> <date> <status> [note]` 手动录入执行回执（stdout utf-8 修复）
+- **知识库建档扩展**：5 份关注池产品档案（001480 财通成长优选/675123 西部利得汇逸债券C/025687 国泰半导体制造C/016347 招商煤炭等权E/022720 广发港股通央企红利联接C；016347 雪球接口降级由天天基金 pingzhongdata 补全），现有 8 份档案齐
+- **ic_backtest.py（IC 回测框架）**：离线 walk-forward + purge/embargo（间距≥20 交易日，无重叠标签稳健版 ICIR）；逐因子 Spearman Rank IC + ICIR；复用 nav_adj 复权与生产同源因子解析；基准映射（equity→沪深300/csi500、bond→中证全债、mixed→50/50）；point-in-time 意识（因子仅用 t 及以前数据，规模/同类排名无历史序列注明未测）；输出 reports/ic_report_<date>.md（gitignore）
+- **IC 实证结果（8 产品 2021-2026，样本小仅参考）**：夏普 ≈0（验证"无预测力"预测）；风格中性超额弱正（稳健版 ICIR 0.40/0.41）；尾部风险负向（风险补偿效应）；**费率 IC 负向与"最稳定为正"预测相反**（样本小+类型混杂：债基低费率低收益主导，结论不自动改权重，待样本扩充后重测）
+- **监控埋点升级（B2）**：`[candidate_monitor] pool=N group=... sat={维度:饱和率} missing={...} scores=[...]`，饱和率>30% 追加 ⚠️SAT 告警
+- 验证：四测试全绿（15/15+28/28+76/76+23/23）；端到端通过
+
 ### main.py 拆分方案（P2，已存档待执行）
 - 现状 1909 行；目标 ≤800 行。建议顺序（每次拆一个模块、拆完跑全部测试、只移代码不改逻辑）：
   1. `data_fetcher.py`：DataFetcher 类 + fetch_section/fetch_once/_mark_fetch/fetch_once 工具
@@ -100,7 +109,7 @@
 ## 待办（下一步）🔜
 
 - [x] 云端四客户版首跑验证（2026-08-07 完成）：微信四条推送（Harley/Echo 独立接收）+ Pages 客户入口页四链接 + **AI 综述板块与方向倾向句实测通过**（核对清单 1-4 全部符合：summary 含 ≥2 快照数值因果链/跨市场/新闻传导/方向倾向三选一 ≤180 字；产品解读风险/背离/传导 ≥2 项；不复读 CRO；compact ≤3700 字节；状态标签 ✅/👀/⚠️ 与"止盈持续中（第 N 天）"正常）
-- [ ] 技术治理记账项剩余 3 项修复（pending_lines 死代码 / add_trading_days 回退 TypeError / portfolio_diagnostics products 参数未用）
+- [x] 技术治理记账项修复（3 项已清：pending_lines 死代码 / add_trading_days 回退 TypeError / portfolio_diagnostics products 参数；费率口径与 max_dd 剪裁已由 V3.1 覆盖）
 - [ ] 向 NULL_Xue 发送 docs/CLIENT_ONBOARDING.md，索要 Server酱 SendKey；收到后配 per-client push 并更新 Secret
 - [ ] 客户持仓信息到位后：填 holdings，按各自风险偏好设 target（出厂默认起步，非 Evan 调优值）
 - [ ] 用户确认 GitHub Secret SERVERCHAN_KEY 已添加（Actions 失败通知用）
@@ -109,6 +118,8 @@
 - [ ] D 迭代：多平台结算参数校准（等用户提供且慢/支付宝实测数据）
 - [ ] 知识库建档扩展：重点关注产品持续更新档案
 - [ ] 影子模式期满后：信号命中率统计、止盈算法转正式
+- [ ] **IC 回测样本扩充后重测**：ic_backtest.py 已可跑（8 产品样本小），关注池扩充或时间积累后重跑，重点复核费率 IC 方向（当前与预测相反，疑类型混杂所致）——复核后才考虑权重 ∝ ICIR 校准
+- [ ] dynamic_tp_line 分红再投资台账：排期 2027-01 初专项（期满前 1 个月，留观察期）
 - [ ] 经理任期快照冷启动积累：V3.1 起每日记录 manager 快照，随运行自然攒任期历史；关注池产品可人工补 `manager_since`
 - [ ] V3.1 云端首跑核对（下个交易日 cron 自动生效）：BUY-NEW 候选评分（需权益缺口且无预警时才出现）、申购状态/成立门槛剔除日志、复权口径下的产品收益数字
 

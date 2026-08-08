@@ -1861,7 +1861,7 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
                 diag_data["bench_weights"] = bw
                 bench_weights = bw
         diag = rules.portfolio_diagnostics(
-            cfg, products, diag_data)
+            cfg, diag_data)
         if diag:
             L("")
             L(f"## 组合诊断")

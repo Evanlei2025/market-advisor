@@ -285,7 +285,7 @@ def test_portfolio_diagnostics(check):
     bench_full = {'returns': returns, 'weights': weights,
                   'bench_returns': {'CSI300': ret_series(120, 0.015)},
                   'bench_weights': {'CSI300': 1.0}}
-    out = rules.portfolio_diagnostics(CFG, [], bench_full)
+    out = rules.portfolio_diagnostics(CFG, bench_full)
     check('G4 正常组合键完整', out is not None and set(out.keys()) ==
           {'vol', 'max_dd', 'var95', 'excess_ann', 'alpha', 'beta', 'ir'}, 'out=%s' % out)
     check('G4 vol/max_dd/var95合理', out is not None and 0.01 < out['vol'] < 0.35
@@ -299,19 +299,19 @@ def test_portfolio_diagnostics(check):
     # G4.2 样本不足（<30天）-> None
     r29 = {'A': ret_series(29, 0.02)}
     check('G4 样本<30 -> None',
-          rules.portfolio_diagnostics(CFG, [], {'returns': r29, 'weights': {'A': 1.0}}) is None)
+          rules.portfolio_diagnostics(CFG, {'returns': r29, 'weights': {'A': 1.0}}) is None)
     # G4.3 基准对齐不足（<60天）-> 四字段 None，vol 等仍正常
     bench_short = {'returns': returns, 'weights': weights,
                    'bench_returns': {'CSI300': ret_series(50, 0.015, start='2025-06-01')},
                    'bench_weights': {'CSI300': 1.0}}
-    out = rules.portfolio_diagnostics(CFG, [], bench_short)
+    out = rules.portfolio_diagnostics(CFG, bench_short)
     check('G4 基准对齐<60四字段None', out is not None and out['vol'] is not None
           and out['excess_ann'] is None and out['alpha'] is None
           and out['beta'] is None and out['ir'] is None, 'vol=%s' % (out and out['vol']))
     # G4.4 纯债低波动 vs 全权益高波动
-    b = rules.portfolio_diagnostics(CFG, [],
+    b = rules.portfolio_diagnostics(CFG,
                                     {'returns': {'B': ret_series(120, 0.0005)}, 'weights': {'B': 1.0}})
-    e = rules.portfolio_diagnostics(CFG, [],
+    e = rules.portfolio_diagnostics(CFG,
                                     {'returns': {'E': ret_series(120, 0.02)}, 'weights': {'E': 1.0}})
     check('G4 纯债波动显著低', b is not None and e is not None
           and b['vol'] < e['vol'] / 3 and b['max_dd'] > e['max_dd'] and b['max_dd'] < 0,
@@ -319,10 +319,10 @@ def test_portfolio_diagnostics(check):
                                                  b and b['max_dd'], e and e['max_dd']))
     # G4.5 空 returns -> None
     check('G4 空returns -> None',
-          rules.portfolio_diagnostics(CFG, [], {'returns': {}, 'weights': {}}) is None)
+          rules.portfolio_diagnostics(CFG, {'returns': {}, 'weights': {}}) is None)
     # G4.6 weights 与 returns 无交集 -> None
     check('G4 权重无交集 -> None',
-          rules.portfolio_diagnostics(CFG, [], {'returns': returns, 'weights': {'X': 1.0}}) is None)
+          rules.portfolio_diagnostics(CFG, {'returns': returns, 'weights': {'X': 1.0}}) is None)
 
 
 def test_build_order_book(check):

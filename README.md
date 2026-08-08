@@ -58,6 +58,8 @@ python test_tp.py              # 止盈算法 15 场景单测
 python test_clients.py         # 多客户 28 项单测（配置解析/状态隔离）
 python test_rules.py           # 规则引擎 76 项单测（权益目标/评分引擎/订单簿/诊断）
 python test_gatekeeper.py      # Gatekeeper 23 项单测（数字审计/黑名单/白名单/闸门）
+python ic_backtest.py          # IC 回测（评分引擎权重验证，离线，输出 reports/ic_report_<date>.md）
+python record_feedback.py <client> <date> <status> [note]  # 执行回执手动录入
 ```
 
 ## 决策规则（透明公开，rules.py 权威，AI 无权修改）

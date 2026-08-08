@@ -5,3 +5,4 @@ logs/
 reports/
 __pycache__/
 *.pyc
+state.json
