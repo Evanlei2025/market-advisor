@@ -4,6 +4,7 @@
 无跨日磁盘，状态与在途资金以 config（Secret）人工维护为准，本模块只读兼容。
 跨日持久通道：knowledge_base/ 下 JSON（云端 Actions commit 回写）——
   traces.json（止盈留痕）、recommendations.json（推荐日志）、
+  feedback.json（执行回执，双写）、manager_snapshots.json（经理任期快照，双写）、
   state_history.json（每日状态快照：在途资金/冷却期/上次调仓日期等，最近 60 条）。
 提供：在途资金表、最近指令/执行状态、冷却期判定、留痕表读写、知识库读取、
      影子模式进度统计、状态快照读写、昨日推荐/近期信号回顾。
@@ -54,6 +55,50 @@ def set_(key, value):
     st = load_state()
     st[key] = value
     save_state(st)
+
+
+# ---------------- kb 通用读写（云端跨日持久通道辅助） ----------------
+# feedback / manager_snapshots 双写通道：state.json 为本地兼容缓存（gitignore），
+# knowledge_base/ 下文件随云端 Actions commit 回写跨日持久（事实源）。
+FEEDBACK_KB_PATH = os.path.join(KB_DIR, 'feedback.json')
+MANAGER_SNAPSHOT_KB_PATH = os.path.join(KB_DIR, 'manager_snapshots.json')
+
+
+def _kb_read(key, file, default):
+    '读 kb 文件顶层 key：文件存在且为合法 JSON dict 且 key 值非 None → 返回该值；否则返回 default（静默降级，不抛异常）。'
+    try:
+        if os.path.exists(file):
+            with open(file, encoding='utf-8') as f:
+                data = json.load(f)
+                v = data.get(key) if isinstance(data, dict) else None
+                if v is not None:
+                    return v
+    except Exception:
+        pass
+    return default
+
+
+def _kb_write(key, data, file):
+    '整文件写 kb 文件：读旧 doc（保留其他 key）→ 更新目标 key → 写回（ensure_ascii=False, indent=2）。失败仅记日志，不抛异常。'
+    try:
+        os.makedirs(KB_DIR, exist_ok=True)
+        doc = {}
+        try:
+            if os.path.exists(file):
+                with open(file, encoding='utf-8') as f:
+                    old = json.load(f)
+                    if isinstance(old, dict):
+                        doc = old
+        except Exception:
+            doc = {}
+        doc[key] = data
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        log_state('[WARN] kb 写入失败: ' + str(e))
+        return False
+
 
 
 # ---------------- 在途资金表 ----------------
@@ -368,31 +413,44 @@ def record_trace(entry, client=None):
         log_state('[WARN] 留痕失败: ' + str(e))
 
 
-# ---------------- 执行回执历史（feedback，state.json 内） ----------------
+# ---------------- 执行回执历史（feedback：state.json 本地缓存 + knowledge_base/feedback.json 双写） ----------------
 
 
 def record_feedback(client, date, status, note=""):
-    '追加一条执行回执到 state.json 的 feedback 数组（条目 {client, date, status, note}；client 用 _norm_client 归一，None → Evan_Lei）。沿用 load_state()/save_state()，只新增 feedback key，不破坏既有结构；state.json 缺失时自动创建。'
+    '追加一条执行回执（条目 {client, date, status, note}；client 用 _norm_client 归一，None → Evan_Lei）。双写：state.json 的 feedback 数组（本地兼容缓存）与 knowledge_base/feedback.json（云端跨日持久，事实源）；state.json 写失败不阻塞 kb 写，任一失败仅记日志。'
     try:
-        st = load_state()
-        fb = st.get('feedback')
+        entry = {'client': _norm_client({'client': client}),
+                 'date': str(date),
+                 'status': str(status),
+                 'note': str(note)}
+        # 本地 state.json（缓存；写失败不阻塞 kb 双写）
+        try:
+            st = load_state()
+            fb = st.get('feedback')
+            if not isinstance(fb, list):
+                fb = []
+            fb.append(entry)
+            st['feedback'] = fb
+            save_state(st)
+        except Exception as e:
+            log_state('[WARN] 回执 state.json 写入失败: ' + str(e))
+        # kb 双写（事实源，随云端 Actions commit 跨日持久）
+        fb = _kb_read('feedback', FEEDBACK_KB_PATH, [])
         if not isinstance(fb, list):
             fb = []
-        fb.append({'client': _norm_client({'client': client}),
-                   'date': str(date),
-                   'status': str(status),
-                   'note': str(note)})
-        st['feedback'] = fb
-        save_state(st)
+        fb.append(entry)
+        _kb_write('feedback', fb, FEEDBACK_KB_PATH)
         log_state('[FEEDBACK] 已记录: ' + str(status) + ' @' + str(date))
     except Exception as e:
         log_state('[WARN] 回执写入失败: ' + str(e))
 
 
 def get_feedback(client=None, limit=1):
-    '返回该客户最近 limit 条执行回执（按 date 倒序；为隔离必须按客户过滤，client=None → 默认 DEFAULT_CLIENT）；feedback 缺失/损坏 → []。返回 list[dict]。'
+    '返回该客户最近 limit 条执行回执（按 date 倒序；为隔离必须按客户过滤，client=None → 默认 DEFAULT_CLIENT）。读路径：knowledge_base/feedback.json 优先（存在且 feedback 为 list → 用它，事实源），缺失/损坏 → 回退 state.json；两处皆缺失/损坏 → []。返回 list[dict]。'
     try:
-        fb = load_state().get('feedback')
+        fb = _kb_read('feedback', FEEDBACK_KB_PATH, None)
+        if not isinstance(fb, list):
+            fb = load_state().get('feedback')
         if not isinstance(fb, list):
             return []
         cl = _norm_client({'client': client})
@@ -403,15 +461,41 @@ def get_feedback(client=None, limit=1):
         return []
 
 
-# ---------------- 经理快照（manager_snapshots，state.json 内） ----------------
+# ---------------- 经理快照（manager_snapshots：state.json 本地缓存 + knowledge_base/manager_snapshots.json 双写） ----------------
 # 候选评分「经理任期维度」数据层：免费源只有经理名字符串（如「马芳 姚加红」）无任职日期，
 # 经理变更侦测自己攒任期：每次跑批按 code 存快照，字符串变化那天 = 新任期起点，之后自然累积。
 # 冷启动无历史 → 调用方三态处理（已知≥12月不惩罚 / 已知<12月×0.85 / 未知×0.95+标签）。
 MANAGER_SNAPSHOT_MAX = 200
 
 
+def _apply_manager_snapshot(snaps, code, mgr, when_str, cl):
+    '快照更新+清理（state.json / kb 双写共用）：manager 为空/None → 只更新 last_seen 不动 since；code 无历史 → since_date=when_str；已有历史且 manager 变化 → since_date=when_str（新任期起点）+ 更新 manager；相同 → 仅刷 last_seen。超过 MANAGER_SNAPSHOT_MAX 保留最近 last_seen 的。返回新 dict。'
+    if not isinstance(snaps, dict):
+        snaps = {}
+    prev = snaps.get(code)
+    if isinstance(prev, dict) and prev.get('since_date') and _is_iso_date(str(prev.get('since_date'))[:10]):
+        old_mgr = str(prev.get('manager', '') or '').strip()
+        if mgr and mgr != old_mgr:
+            prev['manager'] = mgr
+            prev['since_date'] = when_str
+        elif mgr:
+            prev['manager'] = mgr
+        prev['last_seen'] = when_str
+        prev['client'] = cl
+        snaps[code] = prev
+    else:
+        snaps[code] = {'manager': mgr, 'since_date': when_str,
+                       'last_seen': when_str, 'client': cl}
+    if len(snaps) > MANAGER_SNAPSHOT_MAX:
+        items = sorted(snaps.items(),
+                       key=lambda kv: (str(kv[1].get('last_seen', '')) if isinstance(kv[1], dict) else '', kv[0]),
+                       reverse=True)
+        snaps = dict(items[:MANAGER_SNAPSHOT_MAX])
+    return snaps
+
+
 def record_manager_snapshot(code, manager_str, client=None, when=None):
-    '经理变更侦测快照：manager 为空/None → 只更新 last_seen 不动 since；code 无历史 → since_date=今天（when 缺省）；已有历史且 manager 变化 → since_date=今天（新任期起点）+ 更新 manager；相同 → 仅刷 last_seen。key 直接用 code（经理是基金属性不是客户属性，多客户共用快照），写入时记录 client 便于审计。'
+    '经理变更侦测快照：key 直接用 code（经理是基金属性不是客户属性，多客户共用快照），写入时记录 client 便于审计。双写：state.json（本地兼容缓存）与 knowledge_base/manager_snapshots.json（云端跨日持久，事实源）；>200 清理双写都执行；state.json 写失败不阻塞 kb 写。'
     try:
         code = str(code or '').strip()
         if not code:
@@ -425,44 +509,37 @@ def record_manager_snapshot(code, manager_str, client=None, when=None):
         else:
             when_str = date.today().isoformat()
         mgr = str(manager_str or '').strip()
-        st = load_state()
-        snaps = st.get('manager_snapshots')
-        if not isinstance(snaps, dict):
-            snaps = {}
         cl = _norm_client({'client': client})
-        prev = snaps.get(code)
-        if isinstance(prev, dict) and prev.get('since_date') and _is_iso_date(str(prev.get('since_date'))[:10]):
-            old_mgr = str(prev.get('manager', '') or '').strip()
-            if mgr and mgr != old_mgr:
-                prev['manager'] = mgr
-                prev['since_date'] = when_str
-            elif mgr:
-                prev['manager'] = mgr
-            prev['last_seen'] = when_str
-            prev['client'] = cl
-            snaps[code] = prev
-        else:
-            snaps[code] = {'manager': mgr, 'since_date': when_str,
-                           'last_seen': when_str, 'client': cl}
-        if len(snaps) > MANAGER_SNAPSHOT_MAX:
-            items = sorted(snaps.items(),
-                           key=lambda kv: (str(kv[1].get('last_seen', '')) if isinstance(kv[1], dict) else '', kv[0]),
-                           reverse=True)
-            snaps = dict(items[:MANAGER_SNAPSHOT_MAX])
-        st['manager_snapshots'] = snaps
-        save_state(st)
+        # 本地 state.json（缓存；写失败不阻塞 kb 双写）
+        try:
+            st = load_state()
+            s1 = st.get('manager_snapshots')
+            if not isinstance(s1, dict):
+                s1 = {}
+            st['manager_snapshots'] = _apply_manager_snapshot(s1, code, mgr, when_str, cl)
+            save_state(st)
+        except Exception as e:
+            log_state('[WARN] manager snapshot state.json 写入失败: ' + str(e))
+        # kb 双写（事实源，随云端 Actions commit 跨日持久）
+        s2 = _kb_read('manager_snapshots', MANAGER_SNAPSHOT_KB_PATH, {})
+        if not isinstance(s2, dict):
+            s2 = {}
+        _kb_write('manager_snapshots', _apply_manager_snapshot(s2, code, mgr, when_str, cl),
+                  MANAGER_SNAPSHOT_KB_PATH)
         log_state('[MGR] snapshot ' + code + ': ' + (mgr or '<empty>'))
     except Exception as e:
         log_state('[WARN] manager snapshot failed: ' + str(e))
 
 
 def manager_snapshot(code):
-    '读取经理快照 {manager, since_date, last_seen}；manager_snapshots 缺失/损坏/无记录/since_date 非法/manager 为空（从未见过经理名，等同未知）→ None。'
+    '读取经理快照 {manager, since_date, last_seen}。读路径：knowledge_base/manager_snapshots.json 优先（存在且 manager_snapshots 为 dict → 用它，事实源），缺失/损坏 → 回退 state.json；两处皆缺失/损坏/无记录/since_date 非法/manager 为空（从未见过经理名，等同未知）→ None。'
     try:
         code = str(code or '').strip()
         if not code:
             return None
-        snaps = load_state().get('manager_snapshots')
+        snaps = _kb_read('manager_snapshots', MANAGER_SNAPSHOT_KB_PATH, None)
+        if not isinstance(snaps, dict):
+            snaps = load_state().get('manager_snapshots')
         if not isinstance(snaps, dict):
             return None
         cur = snaps.get(code)

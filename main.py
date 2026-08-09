@@ -1563,6 +1563,12 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
             plines, pctx = analyze_product(fetcher, p, cfg, per_code_bench, nav_cache)
             product_plines.append((p, plines, pctx))
             product_ctxs.append(pctx)
+            try:
+                mname = pctx.get("manager")
+                if mname:
+                    state_store.record_manager_snapshot(p.get("code", ""), str(mname).strip(), client=client_id)
+            except Exception:
+                pass
             nav_s = pctx.get("nav_series")
             if nav_s is not None and len(nav_s) > 30:
                 _rc = _ret_col_local(nav_s)
@@ -2070,6 +2076,12 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
                         f"- 本次共采集 {len(FETCH_STATUS)} 项：成功 {ok_n}，失败/降级 {fail_n}\n"
                         + ("\n".join(fail_lines) + "\n" if fail_lines else "- 全部数据源正常 ✓\n")
                         + "*核心数据失败时指令按降级数据生成，请谨慎参考；明细类失败仅影响对应板块展示。*")
+    try:
+        mon_line = rules.candidate_monitor_line()
+        if mon_line:
+            report_full += f"\n- 候选评分监控：{mon_line}"
+    except Exception:
+        pass
 
     # ---------- 12.5 状态快照（3.4：跨日持久化到 knowledge_base，随 Actions commit 回写） ----------
     try:

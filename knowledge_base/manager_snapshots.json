@@ -1,0 +1,46 @@
+{
+  "manager_snapshots": {
+    "003504": {
+      "manager": "徐栋 李怡文 江山",
+      "since_date": "2026-08-09",
+      "last_seen": "2026-08-09",
+      "client": "Evan_Lei"
+    },
+    "014846": {
+      "manager": "张李陵 江海峰",
+      "since_date": "2026-08-09",
+      "last_seen": "2026-08-09",
+      "client": "Evan_Lei"
+    },
+    "006195": {
+      "manager": "马芳 姚加红",
+      "since_date": "2026-08-09",
+      "last_seen": "2026-08-09",
+      "client": "NULL_Xue"
+    },
+    "001480": {
+      "manager": "金梓才",
+      "since_date": "2026-08-09",
+      "last_seen": "2026-08-09",
+      "client": "Harley_Lei"
+    },
+    "675123": {
+      "manager": "袁朔 董伟炜",
+      "since_date": "2026-08-09",
+      "last_seen": "2026-08-09",
+      "client": "Harley_Lei"
+    },
+    "025687": {
+      "manager": "彭凌志",
+      "since_date": "2026-08-09",
+      "last_seen": "2026-08-09",
+      "client": "NULL_Xue"
+    },
+    "022720": {
+      "manager": "霍华明",
+      "since_date": "2026-08-09",
+      "last_seen": "2026-08-09",
+      "client": "NULL_Xue"
+    }
+  }
+}

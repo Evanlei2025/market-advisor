@@ -98,6 +98,18 @@
 - **监控埋点升级（B2）**：`[candidate_monitor] pool=N group=... sat={维度:饱和率} missing={...} scores=[...]`，饱和率>30% 追加 ⚠️SAT 告警
 - 验证：四测试全绿（15/15+28/28+76/76+23/23）；端到端通过
 
+### 迭代五：state 云端持久化 + 数据源审计 + 监控接入（2026-08-09）
+- **A1 state.json 云端持久化**：新增 knowledge_base/feedback.json 与 manager_snapshots.json（git 回写通道）；record_feedback/record_manager_snapshot 双写（state.json 本地缓存 + kb 事实源），get_feedback/manager_snapshot 读 kb 优先→state.json 回退；API 签名全不变；>200 清理双写一致
+- **经理快照接线修复**（V3.1 缺口：record_manager_snapshot 零调用）：main.py run_client 产品分析后每日记录经理名（7 产品已入 kb，016347 资料接口失败不写属正常降级）；跨日自然积累任期（since 变化日=新任期起点）
+- **B3 监控接入报告**：rules.py 新增 `candidate_monitor_line()`（消费式 getter，不破坏 build_order_book 签名）；main.py 系统运行状态板块追加"候选评分监控"行（pool/group/sat/missing/⚠️SAT，无候选评分时不出行）
+- **A2 数据源审计**：docs/DATA_SOURCE_AUDIT.md（akshare 1.18.81 实测 5 维度）：持有人结构 ✅F10 cyrjg（半年报，675123 机构占比 98.72% 实测）；换手率 ✅fund_portfolio_change_em；债基杠杆 ✅F10 zcfzb（1.008x 实测）/久期信用 ✗降级 config；A/C 份额 ✅fund_name_em+雪球费率表；规模历史 ✅F10 gmbd 季度序列（天然 point-in-time 防重述）。4.5 项纳入迭代六接入候选，统一天天基金 F10 三通道解析器（cyrjg/gmbd/zcfzb）
+- 验证：四测试全绿（15/15+28/28+76/76+23/23）；强制端到端（patch 交易日）经理快照写入验证
+
+### 云端运行排查（2026-08-09）
+- Actions 记录（UTC）：08-07 cron success（10:31 UTC，报告+推送+Pages 全成功）；**08-06 cron failure（13:22 UTC）仅最后一步 Deploy to Pages 失败**（报告生成/推送/回写/归档全成功，08-07 已自动恢复）；**08-08/08-09 周末无 schedule 运行**——cron '35 7 * * 1-5' 仅工作日，周末不推是预期行为（非故障）
+- 结论：08-07 报告用户已收到（验证过 AI 1-4 条）；08-06 仅网页部署失败不影响推送；"昨天没收到"若指 08-08 周六=正常不跑
+- 待用户决策：是否改 cron 为每日（周末也推）？SERVERCHAN_KEY Secret 是否已配（08-06 失败通知是否收到）？
+
 ### main.py 拆分方案（P2，已存档待执行）
 - 现状 1909 行；目标 ≤800 行。建议顺序（每次拆一个模块、拆完跑全部测试、只移代码不改逻辑）：
   1. `data_fetcher.py`：DataFetcher 类 + fetch_section/fetch_once/_mark_fetch/fetch_once 工具
@@ -121,7 +133,7 @@
 - [ ] **IC 回测样本扩充后重测**：ic_backtest.py 已可跑（8 产品样本小），关注池扩充或时间积累后重跑，重点复核费率 IC 方向（当前与预测相反，疑类型混杂所致）——复核后才考虑权重 ∝ ICIR 校准
 - [ ] dynamic_tp_line 分红再投资台账：排期 2027-01 初专项（期满前 1 个月，留观察期）
 - [ ] 经理任期快照冷启动积累：V3.1 起每日记录 manager 快照，随运行自然攒任期历史；关注池产品可人工补 `manager_since`
-- [ ] **state.json 云端持久化缺口**（迭代四发现）：state.json 已入 .gitignore（本地运行状态），但 feedback 与 manager_snapshots 存于此——云端每次运行全新环境读不到本地记录（云端 manager 任期恒"未知"×0.95、执行回执显示"暂无反馈"）。方案：随 write_state_snapshot 通道并入 knowledge_base git 回写（或独立 kb 文件），排期执行
+- [x] **state.json 云端持久化缺口**（迭代五已修：feedback/manager_snapshots 双文件 kb 回写通道 + 经理快照接线）
 - [ ] V3.1 云端首跑核对（下个交易日 cron 自动生效）：BUY-NEW 候选评分（需权益缺口且无预警时才出现）、申购状态/成立门槛剔除日志、复权口径下的产品收益数字
 
 ## 关键技术点备忘

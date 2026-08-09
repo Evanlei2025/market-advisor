@@ -520,6 +520,7 @@ _THEME_WORDS = ('半导体', '医药', '医疗', '消费', '红利', '煤炭', '
 _candidate_pool = []      # 本轮候选 pctx 列表（build_order_book 过滤后设置；用后清理）
 _candidate_others = []    # 组合内其他产品 pctx 列表（边际贡献用）
 _candidate_monitor = []   # B2 评分监控条目；emit 后清空，仅观测不参与打分
+_last_candidate_monitor = None  # B3 模块级缓存：最近一条评分监控摘要（_emit_candidate_monitor 写入；candidate_monitor_line 消费式读取后清空）
 
 
 def candidate_weights():
@@ -545,10 +546,14 @@ def _clear_candidate_pool():
 def _emit_candidate_monitor(pool_n):
     """B2 评分监控埋点：pool 内各维度 饱和率（子分=0 或 =1 占比）/缺失率（raw None 占比）
     + 全部候选分；一条结构化行。某维度饱和率 >30% → 追加 ⚠️SAT 告警（维度失效）。
+    B3：摘要行同时缓存到模块级 _last_candidate_monitor（pool/group/sat/missing/flags/scores），
+    供 candidate_monitor_line() 消费式读取（读后即清，防跨客户串数据）。
     由 build_order_book 在 cands 评分循环（sort）结束后调用一次；仅观测不参与打分。"""
+    global _last_candidate_monitor
     try:
         entries = _candidate_monitor
         if not entries:
+            _last_candidate_monitor = None   # 本轮无评分条目 → 视为无数据
             return
         dims = [d for d, _, _ in _CAND_DIMS]
         n = float(len(entries))
@@ -559,18 +564,45 @@ def _emit_candidate_monitor(pool_n):
         for e in entries:
             g = e['group']
             groups[g] = groups.get(g, 0) + 1
-        gs = '\'%s\'' % next(iter(groups)) if len(groups) == 1 else str(groups)
-        flags = ','.join(d for d in dims if sat[d] > 0.30)
+        gs = "'%s'" % next(iter(groups)) if len(groups) == 1 else str(groups)
+        flags = [d for d in dims if sat[d] > 0.30]
         scores = [round(e['score'], 2) for e in entries]
-        print('[candidate_monitor] pool=%d group=%s sat={%s} missing={%s} scores=%s%s'
-              % (pool_n, gs,
-                 ','.join('%s:%.2f' % (d, sat[d]) for d in dims),
-                 ','.join('%s:%.2f' % (d, miss[d]) for d in dims),
-                 scores, (' ' + '\u26a0\ufe0fSAT:' + flags) if flags else ''))
+        summary = ('pool=%d group=%s sat={%s} missing={%s} scores=%s%s'
+                   % (pool_n, gs,
+                      ','.join('%s:%.2f' % (d, sat[d]) for d in dims),
+                      ','.join('%s:%.2f' % (d, miss[d]) for d in dims),
+                      scores,
+                      (' ' + chr(9888) + chr(65039) + 'SAT:' + ','.join(flags)) if flags else ''))
+        print('[candidate_monitor] ' + summary)
+        _last_candidate_monitor = {
+            'pool': pool_n,
+            'group': gs,
+            'sat': dict(sat),
+            'missing': dict(miss),
+            'flags': list(flags),
+            'scores': list(scores),
+            'line': summary,
+        }
     except Exception:
         pass
     finally:
         _candidate_monitor.clear()
+
+
+def candidate_monitor_line():
+    """B3 getter：返回最近一次候选评分监控摘要行（pool 数/group/sat/missing/告警，无
+    '[candidate_monitor]' 前缀）；本轮无候选评分或无数据 → None。
+    消费式：读取后立即清空缓存，防跨客户串数据（run_client 内时序：
+    build_order_book → 报告组装 → 本 getter，每客户消费一次）。"""
+    global _last_candidate_monitor
+    try:
+        m = _last_candidate_monitor
+        _last_candidate_monitor = None
+        if not m:
+            return None
+        return str(m.get('line'))
+    except Exception:
+        return None
 
 def _peer_group(pctx):
     """同类分组键：f"组合：大类"。大类 = type（equity/mixed/bond/gold/other）；
