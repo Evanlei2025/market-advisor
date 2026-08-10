@@ -43,6 +43,8 @@ config.json (全局段 + clients 多客户配置)
    - `SERVERCHAN_KEY`：Server酱 SendKey（可选，仅失败通知用）
 3. 每个交易日北京时间 15:35 自动运行（一次运行遍历全部客户）；报告存档 artifacts 90 天；`knowledge_base/` 自动 commit 回写（跨日持久，按客户隔离）；Pages 部署：`https://Evanlei2025.github.io/market-advisor/`（客户入口 index.html → 各客户 `/<客户ID>/latest.html`）
 
+网页报告按 Apple HIG 渲染（iOS 原生质感）：深色模式跟随系统、毛玻璃导航条、Inset Grouped 分组卡片；文字数据可视化（分位温度条/区间收益条/组合诊断数字格/涨跌着色/信号徽章）；Chart.js 图表深色自适应。
+
 ## 本地部署
 
 1. `pip install -r requirements.txt`（akshare==1.18.81 已锁定）

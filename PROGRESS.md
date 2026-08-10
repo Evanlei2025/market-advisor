@@ -105,6 +105,24 @@
 - **A2 数据源审计**：docs/DATA_SOURCE_AUDIT.md（akshare 1.18.81 实测 5 维度）：持有人结构 ✅F10 cyrjg（半年报，675123 机构占比 98.72% 实测）；换手率 ✅fund_portfolio_change_em；债基杠杆 ✅F10 zcfzb（1.008x 实测）/久期信用 ✗降级 config；A/C 份额 ✅fund_name_em+雪球费率表；规模历史 ✅F10 gmbd 季度序列（天然 point-in-time 防重述）。4.5 项纳入迭代六接入候选，统一天天基金 F10 三通道解析器（cyrjg/gmbd/zcfzb）
 - 验证：四测试全绿（15/15+28/28+76/76+23/23）；强制端到端（patch 交易日）经理快照写入验证
 
+### 迭代六·B：网页 iOS 原生级重设计（2026-08-10）
+- **设计规范**：Apple HIG（System Colors / Inset Grouped 卡片 / SF Pro+PingFang / 8pt 间距网格 / 深色模式跟随系统 / 毛玻璃导航条）；学习途径：Apple 官方文档需 JS 无法抓取，基于内化 HIG 规范 + 主流 iOS 财富 App 范式
+- **html_render.py 全面重写**（签名 render(md, title, charts) 不变，main.py 零改动）：
+  - 设计令牌双主题 CSS 变量（浅 #F2F2F7/#FFFFFF、深 #000/#1C1C1E、语义蓝红绿橙、0.5px 分隔线、双层柔和阴影）
+  - sticky 毛玻璃导航条（backdrop-filter + rgba 兜底）+ 大标题 34px + 章节分组头
+  - h2 → Inset Grouped 白色圆角卡片（16px 圆角），h1 前图表区独立卡片化
+  - 列表行 iOS 设置页样式（0.5px 分隔线、44px+ 触控区）、表格去边框化（行分隔线+灰色表头）、blockquote → iOS 提醒卡（「今日一句话」渐变信息卡特型）
+  - 入口页：链接行卡片化 + chevron
+- **文字数据可视化（渲染层解析，不改 markdown）**：
+  - 分位温度条：「分位 N%」→ 蓝-橙-红色阶条（hsl 210-0 映射）+ 数字标签（估值/利率/性价比 15 处）
+  - 区间收益条：产品「近1周/1月/3月/6月/1年」→ 红涨绿跌横向条 chips
+  - 组合诊断数字格：波动率/250日最大回撤/日度VaR95 → iOS 健康 App 风格数字卡（含人话解释）
+  - 涨跌着色（🟢→绿 🔴→红）、规则信号徽章（✅/👀/⚠️ → 彩色 pill）、⚠️ 警示行红字、注释行弱化
+- **Chart.js 升级**：估值条温度色阶圆角柱 / 饼图 iOS 色板 cutout 62% / 净值曲线渐变填充+基准虚线；**深色模式**：脚本读 getComputedStyle CSS 变量动态取色（深浅自动切换）
+- 动效：淡入 + 卡片 stagger（prefers-reduced-motion 全关）；meta theme-color 双模式
+- **修复**：⚠️ 双码点正则（[⚠️]→(✅|👀|⚠️) 交替）；饼图 cutout '62%' 撞 % 格式化（62%%）；产品行括号残缺（_PROD_ROW 简化）；收益条 ++ 重复加号
+- **验证**：4 客户+入口页 HTML 结构闭合检查（Evan_Lei 3 图表/15 组/3 产品卡/3 诊断格/15 温度条/15 收益条/3 徽章/5 涨跌色）；四测试 15/15+28/28+84/84+23/23 全绿
+
 ### 迭代六：评分引擎新维度接入（2026-08-09，数据源审计落地 4.5 项）
 - **F10 统一解析器**：`_f10_table`（FundArchivesDatas.aspx + Referer 头 + content 提取 + read_html），一解析器覆盖 3 维度（cyrjg/gmbd/zcfzb），实测 0.6-2.4s/次 + 进程内缓存
 - **数据层 5 方法**（全部实测对照审计数值）：

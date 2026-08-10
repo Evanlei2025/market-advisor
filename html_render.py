@@ -1,7 +1,19 @@
 # -*- coding: utf-8 -*-
-"""完整版报告 → HTML 网页（极简 markdown 渲染，无第三方依赖）。
-生成自包含单页：GitHub Pages 直接可展示。
-6.1：支持 markdown 表格；charts 参数注入 Chart.js 图表（净值曲线/仓位饼图/估值条形图）。
+"""完整版报告 → HTML 网页（iOS 原生质感渲染，无第三方依赖）。
+
+自包含单页：GitHub Pages 直接可展示。
+设计语言：Apple HIG —— System Colors / Inset Grouped 分组卡片 / 深色模式跟随系统 /
+毛玻璃导航条 / 8pt 间距网格 / tabular-nums 数字 / prefers-reduced-motion。
+
+7.0 大改版：
+- 设计令牌双主题（CSS 变量，@media prefers-color-scheme 跟随系统）
+- 章节卡片化（h2 分组头 + Inset Grouped 白色圆角卡）
+- 文字数据可视化（不改 markdown 内容，纯渲染层解析）：
+  分位温度条（PE/利率/股债性价比等「分位 N%」→ 蓝-橙-红色阶条）
+  区间收益条（产品「近X ±Y%」→ 红涨绿跌横向条）
+  组合诊断数字格（波动率/回撤/VaR95 → iOS 健康 App 风格数字卡）
+  涨跌着色（🟢/🔴 → 绿/红语义色）、规则信号徽章（✅/👀/⚠️ → 彩色 pill）
+- Chart.js 深色自适应（脚本读 CSS 变量取色）
 """
 import html as html_lib
 import json
@@ -9,6 +21,33 @@ import re
 
 _TABLE_ROW = re.compile(r"^\|(.+)\|$")
 _SEP_ROW = re.compile(r"^\|[\s:|-]+\|$")
+
+# ---------- 可视化行模式（纯渲染层，不动 markdown） ----------
+# 「分位 N%」首次出现 → 温度条（估值/利率/性价比分位等）
+_FENWEI = re.compile(r"分位\s*(\d{1,3}(?:\.\d+)?)\s*[%％]")
+# 区间收益行：区间收益：近1周 +2.2% ｜ 近1月 -3.9% ...
+_RET_ROW = re.compile(r"区间收益\s*[：:]\s*(.+)$")
+_RET_ITEM = re.compile(r"(近1周|近1月|近3月|近6月|近1年)\s*([+-]?\d+(?:\.\d+)?)\s*%")
+# 组合诊断数字格：- 年化波动率 8.3%｜人话：...
+_METRIC_ROW = re.compile(
+    r"^(- )?(年化波动率|250日最大回撤|日度 VaR95)\s+([+-]?\d+(?:\.\d+)?)\s*%"
+    r"([^｜|]*?)\s*[｜|]人话\s*[：:]?\s*(.*)$")
+# 涨跌着色：🟢/🔴 紧跟 ±N%
+_UPDOWN = re.compile(r"([🟢🔴])\s*([+-]?\d+(?:\.\d+)?\s*%)")
+# 规则信号徽章：规则信号：✅ **持有**
+_SIGNAL = re.compile(r"规则信号\s*[：:]\s*(✅|👀|⚠️)\s*\*\*(.+?)\*\*")
+# 产品标题行（裸段落，以 ** 开头，非术语速查列表行）
+_PROD_ROW = re.compile(r"^\*\*(.+?)\*\*(.*)$")
+# 注释弱化行
+_NOTE_LI = re.compile(r"^(注[：:]|执行窗口|调仓后目标仓位)")
+_NOTE_P = re.compile(r"^\*(.+)$")
+
+_TERM_ROW = re.compile(r"^\*\*(.+?)\*\*[：:]\s*")
+
+
+def _pct_hue(n):
+    """分位 → 温度色相：0%=210(蓝) … 100%=0(红)，iOS 财富温度约定"""
+    return max(0, min(210, int(210 - 2.1 * n)))
 
 
 def _inline(text):
@@ -19,57 +58,309 @@ def _inline(text):
     return t
 
 
+def _render_li_body(line):
+    """列表行内容：信号徽章 + 涨跌着色 + 分位温度条 + 区间收益条"""
+    raw = line[2:].strip()
+    prefix_html = ""
+    m = _SIGNAL.search(raw)
+    if m:
+        cls = {"✅": "b-ok", "👀": "b-watch", "⚠️": "b-warn"}.get(m.group(1), "b-warn")
+        prefix_html = "规则信号：<span class='badge %s'>%s</span>" % (cls, _inline(m.group(2)))
+        raw = raw[:m.start()] + raw[m.end():]
+    out = _inline(raw)
+    if prefix_html:
+        out = prefix_html + out
+    out = _UPDOWN.sub(lambda mm: "<span class='ud %s'>%s</span>" % (
+        "up" if mm.group(1) == "🔴" else "dn", mm.group(2)), out)
+    m = _RET_ROW.search(raw)
+    if m:
+        chips = []
+        for label, num in _RET_ITEM.findall(m.group(1)):
+            v = float(num)
+            w = max(6, min(60, abs(v) * 4))
+            cls = "pos" if v >= 0 else "neg"
+            shown = num if num.startswith(("+", "-")) else ("+" if v >= 0 else "") + num
+            chips.append(
+                "<span class='chip'><i class='%s' style='width:%dpx'></i>"
+                "<b>%s %s%%</b></span>" % (cls, w, label, shown))
+        if chips:
+            out = _RET_ROW.sub("", out, count=1)
+            out += "<span class='ret-chips'>" + "".join(chips) + "</span>"
+    m = _FENWEI.search(raw)
+    if m:
+        n = float(m.group(1))
+        if n <= 100:
+            hue = _pct_hue(n)
+            out += ("<span class='pct'><span class='pct-fill' "
+                    "style='width:%.0f%%;background:hsl(%d,100%%,55%%)'></span></span>"
+                    "<span class='pct-num'>%.0f%%</span>" % (n, hue, n))
+    return out
+
+
+def _render_p(line):
+    """裸段落行：产品标题行 → .prod；说明行 → .note"""
+    raw = line.strip()
+    m = _PROD_ROW.match(raw)
+    if m and not _TERM_ROW.match(raw):
+        inner = _inline(m.group(1))
+        tail = _inline(m.group(2)) if m.group(2) else ""
+        return ("<p class='prod'>%s%s</p>" % (inner, tail and ("<span class='prod-type'>%s</span>" % tail) or ""))
+    if _NOTE_P.match(raw) or raw.startswith("*"):
+        return "<p class='note'>%s</p>" % _inline(raw)
+    return "<p>%s</p>" % _inline(raw)
+
+
 def _charts_html(charts):
     """Chart.js 图表容器（CDN 加载失败时页面正文不受影响）"""
     if not charts:
         return ""
     boxes, init = [], []
     if charts.get("valuation"):
+        vals = charts["valuation"]["values"]
+        colors = ",".join("'hsl(%d,100%%,55%%)'" % _pct_hue(v) for v in vals)
         boxes.append('<div class="chart-box"><h3>估值温度（PE 十年分位 %）</h3>'
                      '<canvas id="chVal"></canvas></div>')
         init.append(
             "new Chart(document.getElementById('chVal'),{type:'bar',"
-            "data:{labels:%s,datasets:[{data:%s,backgroundColor:'#8ab4d8'}]},"
-            "options:{plugins:{legend:{display:false}}}})" % (
+            "data:{labels:%s,datasets:[{data:%s,backgroundColor:[%s],"
+            "borderRadius:6,maxBarThickness:34}]},"
+            "options:{plugins:{legend:{display:false}},"
+            "scales:{y:{beginAtZero:true,max:100,grid:{color:cGrid},"
+            "ticks:{color:cFg,font:{size:11}}},"
+            "x:{grid:{display:false},ticks:{color:cFg,font:{size:12}}}}},"
+            "animation:{duration:400}})" % (
                 json.dumps(charts["valuation"]["labels"], ensure_ascii=False),
-                json.dumps(charts["valuation"]["values"])))
+                json.dumps(vals), colors))
     if charts.get("allocation"):
         boxes.append('<div class="chart-box"><h3>组合仓位构成（市值口径）</h3>'
                      '<canvas id="chAlloc"></canvas></div>')
         init.append(
             "new Chart(document.getElementById('chAlloc'),{type:'doughnut',"
-            "data:{labels:%s,datasets:[{data:%s}]}})" % (
+            "data:{labels:%s,datasets:[{data:%s,backgroundColor:[cBlue,cGreen,cOrange,cPurple,cRed],"
+            "borderColor:cCard,borderWidth:3}]},"
+            "options:{cutout:'62%%',plugins:{legend:{position:'bottom',"
+            "labels:{color:cFg,font:{size:12},padding:12,usePointStyle:true,pointStyleWidth:8}}},"
+            "animation:{duration:400}}})" % (
                 json.dumps(charts["allocation"]["labels"], ensure_ascii=False),
                 json.dumps(charts["allocation"]["values"])))
     if charts.get("nav"):
         nv = charts["nav"]
-        ds = ("{label:'组合',data:%s,borderColor:'#1a4f8b',fill:false,pointRadius:0,tension:0.1}"
-              % json.dumps(nv["values"]))
+        ds = ("{label:'组合',data:%s,borderColor:cBlue,backgroundColor:cBlueFill,"
+              "fill:true,borderWidth:2,pointRadius:0,tension:0.35}" % json.dumps(nv["values"]))
         if nv.get("bench"):
-            ds += (",{label:'基准',data:%s,borderColor:'#c0392b',fill:false,pointRadius:0,tension:0.1}"
-                   % json.dumps(nv["bench"]))
+            ds += (",{label:'基准',data:%s,borderColor:cOrange,fill:false,borderWidth:2,"
+                   "borderDash:[5,4],pointRadius:0,tension:0.35}" % json.dumps(nv["bench"]))
         boxes.append('<div class="chart-box"><h3>组合净值走势（近250日，起点=100）</h3>'
                      '<canvas id="chNav"></canvas></div>')
         init.append(
             "new Chart(document.getElementById('chNav'),{type:'line',"
             "data:{labels:%s,datasets:[%s]},"
-            "options:{scales:{x:{ticks:{maxTicksLimit:8}}}}})" % (
+            "options:{plugins:{legend:{labels:{color:cFg,font:{size:12},usePointStyle:true,"
+            "pointStyleWidth:8,boxHeight:3}}},"
+            "scales:{x:{grid:{display:false},ticks:{color:cFg,font:{size:10},maxTicksLimit:6}},"
+            "y:{grid:{color:cGrid},ticks:{color:cFg,font:{size:11}}}},"
+            "animation:{duration:500}}})" % (
                 json.dumps(nv["labels"]), ds))
     if not boxes:
         return ""
     return ("<script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js\"></script>\n"
+            "<script>\nvar cs=getComputedStyle(document.body);\n"
+            "var cGrid=cs.getPropertyValue('--chart-grid').trim()||'#E5E5EA';\n"
+            "var cFg=cs.getPropertyValue('--chart-fg').trim()||'#8E8E93';\n"
+            "var cCard=cs.getPropertyValue('--card').trim()||'#FFFFFF';\n"
+            "var cBlue=cs.getPropertyValue('--blue').trim()||'#007AFF';\n"
+            "var cGreen=cs.getPropertyValue('--green').trim()||'#34C759';\n"
+            "var cOrange=cs.getPropertyValue('--orange').trim()||'#FF9500';\n"
+            "var cPurple='#AF52DE';\nvar cRed=cs.getPropertyValue('--red').trim()||'#FF3B30';\n"
+            "var cBlueFill=cBlue+'1F';\n"
+            "</script>\n"
             "<div class=\"charts\">" + "\n".join(boxes) + "</div>\n"
             "<script>document.addEventListener('DOMContentLoaded',function(){"
             + ";".join(init) + "});</script>")
 
 
+_CSS = """
+:root {
+  --bg: #F2F2F7; --card: #FFFFFF; --card2: #F7F7FA;
+  --text: #1C1C1E; --text2: #3A3A3C; --text3: #8E8E93; --text4: #C7C7CC;
+  --sep: #E5E5EA; --sep2: rgba(60,60,67,.12);
+  --blue: #007AFF; --green: #34C759; --orange: #FF9500; --red: #FF3B30;
+  --nav-bg: rgba(246,246,250,.72);
+  --shadow: 0 1px 3px rgba(0,0,0,.06), 0 6px 16px rgba(0,0,0,.05);
+  --chart-grid: #E5E5EA; --chart-fg: #8E8E93;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000; --card: #1C1C1E; --card2: #242426;
+    --text: #F2F2F7; --text2: #D1D1D6; --text3: #AEAEB2; --text4: #48484A;
+    --sep: #38383A; --sep2: rgba(84,84,88,.4);
+    --blue: #0A84FF; --green: #32D74B; --orange: #FF9F0A; --red: #FF453A;
+    --nav-bg: rgba(22,22,24,.72);
+    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 6px 18px rgba(0,0,0,.35);
+    --chart-grid: #38383A; --chart-fg: #AEAEB2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--text);
+  margin: 0; line-height: 1.55; font-size: 17px;
+  -webkit-font-smoothing: antialiased;
+  animation: fadeIn .3s ease both;
+}
+@keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+.navbar {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--nav-bg);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8); backdrop-filter: blur(20px) saturate(1.8);
+  border-bottom: .5px solid var(--sep2);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .navbar { background: var(--bg); }
+}
+.nav-inner { max-width: 720px; margin: 0 auto; padding: 10px 20px;
+             display: flex; align-items: baseline; gap: 10px; }
+.nav-brand { font-size: 17px; font-weight: 700; letter-spacing: .2px; }
+.nav-sub { font-size: 13px; color: var(--text3); }
+.page { max-width: 720px; margin: 0 auto; padding: 20px 16px 48px; }
+h1 {
+  font-size: 34px; line-height: 1.15; font-weight: 700; letter-spacing: -0.3px;
+  margin: 10px 4px 4px; padding: 0; border: none;
+}
+.group-h {
+  font-size: 13px; font-weight: 600; color: var(--text3);
+  text-transform: uppercase; letter-spacing: .4px;
+  margin: 26px 8px 8px;
+}
+.group {
+  background: var(--card); border-radius: 16px; box-shadow: var(--shadow);
+  overflow: hidden; animation: rise .4s ease both;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
+.group:nth-child(2) { animation-delay: .05s }
+.group:nth-child(3) { animation-delay: .1s }
+.group:nth-child(4) { animation-delay: .15s }
+.group:nth-child(5) { animation-delay: .2s }
+.group:nth-child(6) { animation-delay: .25s }
+.group:nth-child(7) { animation-delay: .3s }
+.group:nth-child(8) { animation-delay: .35s }
+.group h3 { font-size: 13px; font-weight: 600; color: var(--text3);
+            margin: 0; padding: 12px 16px 0; letter-spacing: .2px; }
+.group > p { margin: 0; padding: 10px 16px; }
+.group > p + p { border-top: .5px solid var(--sep2); }
+.group > p.prod, .group > p.prod + p { border-top: none; }
+ul { list-style: none; margin: 0; padding: 0; }
+li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; font-size: 15px;
+}
+li + li { border-top: .5px solid var(--sep2); }
+li span:first-child { flex: 1; }
+li .pct { flex: 0 0 auto; width: 88px; height: 6px; border-radius: 999px;
+          background: var(--sep); overflow: hidden; margin-left: 4px; }
+li .pct-fill { display: block; height: 100%; border-radius: 999px;
+               transition: width .5s ease; }
+li .pct-num { flex: 0 0 auto; min-width: 40px; text-align: right;
+              font-size: 13px; font-weight: 600; color: var(--text3);
+              font-variant-numeric: tabular-nums; }
+li .ud { font-weight: 600; font-variant-numeric: tabular-nums; }
+li .ud.up { color: var(--red); }
+li .ud.dn { color: var(--green); }
+strong { font-weight: 600; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+         font-size: 13px; font-weight: 600; margin-left: 4px; }
+.b-ok { background: rgba(52,199,89,.14); color: var(--green); }
+.b-watch { background: rgba(255,149,0,.16); color: var(--orange); }
+.b-warn { background: rgba(255,59,48,.13); color: var(--red); }
+.ret-chips { flex: 0 0 auto; display: flex; gap: 12px; align-items: flex-end; margin-left: 4px; }
+.chip { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.chip b { font-size: 11px; font-weight: 600; color: var(--text2);
+          font-variant-numeric: tabular-nums; }
+.chip i { height: 4px; border-radius: 999px; min-width: 6px; }
+.chip i.pos { background: var(--red); }
+.chip i.neg { background: var(--green); }
+.warn-line { color: var(--red); }
+.warn-line strong { color: var(--red); }
+.note, .note em { color: var(--text3); font-size: 14px; }
+.group .prod {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  background: var(--card2); font-size: 16px; font-weight: 700;
+  border-radius: 12px; margin: 12px 12px 4px; padding: 10px 14px;
+}
+.group .prod + p { border-top: none; }
+.group .prod strong { font-size: 16px; font-weight: 700; }
+.prod-type { font-size: 13px; font-weight: 500; color: var(--text3); }
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+               gap: 1px; background: var(--sep2); }
+.metric { background: var(--card); padding: 14px 16px; }
+.metric .m-val { font-size: 26px; font-weight: 700; letter-spacing: -0.4px;
+                 font-variant-numeric: tabular-nums; }
+.metric .m-label { font-size: 13px; color: var(--text3); margin-top: 2px; }
+.metric .m-sub { font-size: 11px; color: var(--text4); }
+.metric .m-note { font-size: 13px; color: var(--text2); margin-top: 8px; line-height: 1.45; }
+blockquote {
+  margin: 0; padding: 14px 16px; font-size: 15px;
+  border-left: 3px solid var(--blue); border-radius: 0 12px 12px 0;
+  background: rgba(0,122,255,.08); color: var(--text);
+}
+.group > blockquote { border-radius: 0; }
+.group > blockquote:first-child {
+  border-left: none; border-radius: 0;
+  background: linear-gradient(135deg, rgba(0,122,255,.14), rgba(10,132,255,.06));
+  padding: 18px 20px; font-size: 16px; font-weight: 500;
+}
+@media (prefers-color-scheme: dark) {
+  .group > blockquote:first-child { background: linear-gradient(135deg, rgba(10,132,255,.22), rgba(10,132,255,.08)); }
+}
+blockquote br { display: none; }
+blockquote br:last-child { display: none; }
+table { border-collapse: collapse; width: 100%; margin: 0; font-size: 14px; }
+thead th {
+  font-size: 12px; font-weight: 600; color: var(--text3); text-align: left;
+  padding: 8px 16px; background: var(--card2);
+}
+tbody td { padding: 11px 16px; border-top: .5px solid var(--sep2);
+           vertical-align: top; }
+tbody tr:first-child td { border-top: none; }
+td:first-child { font-weight: 600; }
+pre { margin: 0; padding: 12px 16px; background: var(--card2); overflow-x: auto;
+      font-size: 13px; }
+hr { border: none; margin: 0; }
+.charts { display: flex; flex-wrap: wrap; gap: 12px; padding: 0 16px; }
+.chart-box { flex: 1 1 320px; min-width: 280px; border-radius: 12px;
+             padding: 12px; background: var(--card2); }
+.chart-box canvas { width: 100% !important; height: 240px !important; }
+.chart-box h3 { padding: 4px 4px 8px; }
+/* 入口页（无分组）：ul 直接成卡片，链接行带 chevron */
+.page > ul { background: var(--card); border-radius: 16px; box-shadow: var(--shadow);
+             overflow: hidden; margin: 16px 0; }
+.page > ul a { display: flex; align-items: center; justify-content: space-between;
+               text-decoration: none; color: var(--text); }
+.page > ul a::after { content: "›"; color: var(--text4); font-size: 22px;
+                      font-weight: 400; margin-left: 8px; }
+code { background: var(--card2); padding: 1px 6px; border-radius: 6px; font-size: 13px; }
+@media (max-width: 640px) {
+  h1 { font-size: 30px; }
+  .page { padding: 14px 12px 40px; }
+  .nav-inner { padding: 10px 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body, .group { animation: none; }
+  .pct-fill { transition: none; }
+}
+"""
+
+
 def render(markdown_text, title="每日投顾报告", charts=None):
-    """markdown → HTML 页面（标题/引用/列表/表格/分隔线/段落/图表）。"""
+    """markdown → HTML 页面（iOS 原生质感；标题/分组卡片/列表/表格/分隔线/段落/图表/可视化）。"""
     body = []
     in_list = False
     in_blockquote = False
     in_code = False
     in_table = False
+    in_group = False
+    metrics = []
     table_rows = []
 
     def close_list():
@@ -83,6 +374,12 @@ def render(markdown_text, title="每日投顾报告", charts=None):
         if in_blockquote:
             body.append("</blockquote>")
             in_blockquote = False
+
+    def close_metrics():
+        nonlocal metrics
+        if metrics:
+            body.append("<div class='metric-grid'>" + "".join(metrics) + "</div>")
+            metrics = []
 
     def close_table():
         nonlocal in_table, table_rows
@@ -98,6 +395,20 @@ def render(markdown_text, title="每日投顾报告", charts=None):
             in_table = False
             table_rows = []
 
+    def close_group():
+        nonlocal in_group
+        if in_group:
+            close_list(); close_quote(); close_table(); close_metrics()
+            body.append("</div>")
+            in_group = False
+
+    def open_group(heading):
+        nonlocal in_group
+        close_group()
+        body.append(f'<h2 class="group-h">{_inline(heading)}</h2>')
+        body.append("<div class='group'>")
+        in_group = True
+
     for raw in markdown_text.splitlines():
         line = raw.rstrip()
         if line.startswith("```"):
@@ -105,7 +416,7 @@ def render(markdown_text, title="每日投顾报告", charts=None):
                 body.append("</pre>")
                 in_code = False
             else:
-                close_list(); close_quote(); close_table()
+                close_list(); close_quote(); close_table(); close_metrics()
                 body.append("<pre>")
                 in_code = True
             continue
@@ -116,85 +427,101 @@ def render(markdown_text, title="每日投顾报告", charts=None):
         if m and not _SEP_ROW.match(line):
             cells = [c for c in m.group(1).split("|")]
             if not in_table:
-                close_list(); close_quote()
+                close_list(); close_quote(); close_metrics()
                 in_table = True
                 table_rows = []
             table_rows.append(cells)
             continue
         if _TABLE_ROW.match(line) and _SEP_ROW.match(line):
-            continue  # 表头分隔行跳过
+            continue
         if in_table:
             close_table()
         if not line.strip():
-            close_list(); close_quote()
+            close_list(); close_quote(); close_metrics()
             body.append("<p></p>")
             continue
         if line.startswith("# "):
-            close_list(); close_quote()
+            close_group()
             body.append(f"<h1>{_inline(line[2:])}</h1>")
         elif line.startswith("## "):
-            close_list(); close_quote()
-            body.append(f"<h2>{_inline(line[3:])}</h2>")
+            open_group(line[3:])
         elif line.startswith("### "):
-            close_list(); close_quote()
+            close_list(); close_quote(); close_metrics()
             body.append(f"<h3>{_inline(line[4:])}</h3>")
         elif line.startswith("> "):
-            close_list(); close_table()
+            close_list(); close_metrics()
             if not in_blockquote:
                 body.append("<blockquote>")
                 in_blockquote = True
             body.append(_inline(line[2:]) + "<br/>")
         elif line.startswith("- ") or line.startswith("* "):
-            close_quote(); close_table()
+            close_quote()
+            if in_table:
+                close_table()
+            close_metrics()
+            mm = _METRIC_ROW.match(line)
+            if mm:
+                metrics.append(
+                    "<div class='metric'><div class='m-val'>%s%%</div>"
+                    "<div class='m-label'>%s</div>%s"
+                    "<div class='m-note'>人话：%s</div></div>" % (
+                        mm.group(3), mm.group(2),
+                        ("<div class='m-sub'>%s</div>" % _inline(mm.group(4).strip())) if mm.group(4).strip() else "",
+                        _inline(mm.group(5).strip())))
+                continue
             if not in_list:
                 body.append("<ul>")
                 in_list = True
-            body.append(f"<li>{_inline(line[2:])}</li>")
+            content = _render_li_body(line)
+            inner = line[2:].strip()
+            if re.match(r"^⚠️", inner):
+                content = "<span class='warn-line'>" + content + "</span>"
+            elif _NOTE_LI.match(inner):
+                content = "<span class='note'>" + content + "</span>"
+            body.append(f"<li>{content}</li>")
         elif re.match(r"^\d+\.\s", line):
             close_quote()
             close_list()
-            close_table()
+            close_metrics()
             body.append(f"<p>{_inline(re.sub(r'^\d+\.\s', '', line))}</p>")
         elif line.startswith("---"):
-            close_list(); close_quote(); close_table()
+            close_list(); close_quote(); close_metrics()
             body.append("<hr/>")
         else:
-            close_list(); close_quote(); close_table()
-            body.append(f"<p>{_inline(line)}</p>")
+            close_list(); close_quote(); close_metrics()
+            body.append(_render_p(line))
+    close_group()
     close_list(); close_quote(); close_table()
     if in_code:
         body.append("</pre>")
+
+    parts = title.split()
+    brand, sub = "投顾日报", ""
+    if len(parts) >= 2:
+        brand = parts[0]
+        sub = " · ".join(parts[-2:]) if len(parts) >= 3 else parts[-1]
+    else:
+        brand = title
 
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="color-scheme" content="light dark"/>
+<meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)"/>
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"/>
 <title>{html_lib.escape(title)}</title>
-<style>
-body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-       max-width: 860px; margin: 0 auto; padding: 16px; color: #222; line-height: 1.7; }}
-h1 {{ font-size: 1.5em; border-bottom: 2px solid #eee; padding-bottom: 8px; }}
-h2 {{ font-size: 1.2em; margin-top: 28px; color: #1a4f8b; }}
-h3 {{ font-size: 1.05em; }}
-blockquote {{ border-left: 4px solid #c8d8ec; margin: 8px 0; padding: 4px 12px;
-             background: #f7fafd; color: #444; }}
-ul {{ padding-left: 20px; }}
-pre {{ background: #f5f5f5; padding: 10px; overflow-x: auto; }}
-hr {{ border: none; border-top: 1px solid #ddd; margin: 24px 0; }}
-code {{ background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }}
-table {{ border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.95em; }}
-th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left; }}
-th {{ background: #f0f5fb; }}
-.charts {{ display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0; }}
-.chart-box {{ flex: 1 1 320px; min-width: 300px; border: 1px solid #eee;
-             border-radius: 8px; padding: 12px; background: #fcfcfc; }}
-.chart-box canvas {{ width: 100% !important; height: 260px !important; }}
-</style>
+<style>{_CSS}</style>
 </head>
 <body>
+<header class="navbar"><div class="nav-inner">
+<span class="nav-brand">{html_lib.escape(brand)}</span><span class="nav-sub">{html_lib.escape(sub)}</span>
+</div></header>
+<div class="page">
 {_charts_html(charts)}
 {''.join(body)}
+</div>
 </body>
 </html>"""
     return page
