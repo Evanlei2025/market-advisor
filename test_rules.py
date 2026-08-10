@@ -276,6 +276,62 @@ def test_score_candidate(check):
     check('G3 收缩拉低离群', pct < unshr and 0.5 <= pct < unshr, 'unshr=%.3f shr=%.3f' % (unshr, pct))
     # G3.16 组内全同（τ=0）→ 收缩无信息 → 0.5
     check('G3 全同组中性', rules._shrink_pct(0, [0.1, 0.1], [0.5, 0.5], [1.0, 1.0]) == 0.5)
+    # ================= 迭代六：评分层数据源增强（holder/scale_hist/leverage/turnover/partner） =================
+    # G3.17 稳定性四因子（任期5/规模4/持有人3/换手3）：
+    #   - holder inst_ratio=0.95（机构定制）→ 子分显著低于 inst_ratio=0.5（均衡结构）
+    sh_h = rules._stability({'holder': {'inst_ratio': 0.95}})
+    sh_m = rules._stability({'holder': {'inst_ratio': 0.5}})
+    check('G3 稳定性机构定制折价', sh_h < sh_m - 0.05 and 0.0 <= sh_h < 1.0,
+          'inst95=%.3f inst50=%.3f' % (sh_h, sh_m))
+    #   - turnover.value=5.0（高换手）→ 低于 value=0.5（低换手）
+    st_hi = rules._stability({'turnover': {'value': 5.0}})
+    st_lo = rules._stability({'turnover': {'value': 0.5}})
+    check('G3 稳定性高换手折价', st_hi < st_lo, 'to5=%.3f to0.5=%.3f' % (st_hi, st_lo))
+    #   - scale_hist 最新期 net_assets 生效（优先于 scale 字段）；change_rate 翻倍/骤降 → 规模子分 ×0.7
+    s_field = rules._stability({'scale': '43.53亿'})
+    s_sh = rules._stability({'scale': '1亿', 'scale_hist': [{'date': '2025-12-31',
+                             'net_assets': 43.53, 'change_rate': 0.1}]})
+    s_dbl = rules._stability({'scale_hist': [{'date': '2025-12-31', 'net_assets': 43.53,
+                             'change_rate': 2.0}]})
+    s_crash = rules._stability({'scale_hist': [{'date': '2025-12-31', 'net_assets': 43.53,
+                                'change_rate': -0.5}]})
+    check('G3 规模变动监测', approx(s_sh, s_field) and approx(s_dbl, s_crash)
+          and s_dbl < s_sh - 0.05, 'f=%.3f sh=%.3f dbl=%.3f crash=%.3f'
+          % (s_field, s_sh, s_dbl, s_crash))
+    #   - 全缺失 → 中性（不崩、0-1）
+    s_none = rules._stability({})
+    check('G3 稳定性全缺失中性', s_none is not None and 0.0 <= s_none <= 1.0 and approx(s_none, 0.73),
+          'none=%s' % s_none)
+    # G3.18 债基杠杆修正：leverage=1.5 → 尾部子分 ×0.7；1.15/1.2 → ×0.85；≤1.1 → 不修正
+    t_dd = rules._tail_risk({'max_dd': '-0.05'})
+    check('G3 尾部杠杆修正',
+          approx(rules._tail_risk({'max_dd': '-0.05', 'leverage': 1.5}), t_dd * 0.7)
+          and approx(rules._tail_risk({'max_dd': '-0.05', 'leverage': 1.15}), t_dd * 0.85)
+          and approx(rules._tail_risk({'max_dd': '-0.05', 'leverage': 1.2}), t_dd * 0.85)
+          and approx(rules._tail_risk({'max_dd': '-0.05', 'leverage': 1.1}), t_dd)
+          and approx(rules._tail_risk({'max_dd': '-0.05', 'leverage': 0.9}), t_dd),
+          'dd=%.3f' % t_dd)
+    # G3.19 TCO A/C 份额择优（partner 结构化费率，低者生效；持有年数可配）
+    pf = {'mgmt': 0.012, 'trustee': 0.002, 'sales': 0.004, 'purchase': 0.0, 'short_redeem': 0.015}
+    partner = {'code': '016858', 'fees': pf}
+    # partner_total(2年) = (0.012+0.002+0.004)*2 + 0 + 0.015 = 0.051 > 本产品 0.015 → 本产品低者生效
+    t_own = rules._tco_score({'fees': '管理0.5%，短期赎回0.5%'}, {'rules': {'candidate_holding_years': 2}})
+    t_both = rules._tco_score({'fees': '管理0.5%，短期赎回0.5%', 'partner': partner},
+                              {'rules': {'candidate_holding_years': 2}})
+    check('G3 TCO partner低者生效own档', approx(t_both, t_own) and approx(t_both, 0.25),
+          'own=%s both=%s' % (t_own, t_both))
+    # 本产品无费率但 partner 存在 → 用 partner 口径（None → 数值）
+    t_pr = rules._tco_score({'partner': partner}, {'rules': {'candidate_holding_years': 2}})
+    check('G3 TCO partner独立可用', t_pr == 0.0
+          and rules._tco_score({}, {'rules': {'candidate_holding_years': 2}}) is None, 'pr=%s' % t_pr)
+    # partner 更优档（管理0.2%/托管0.05%/销售0.05%/短期赎回0.1%）：partner_total(2年)=0.007 < 本产品 0.015
+    pf_c = {'mgmt': 0.002, 'trustee': 0.0005, 'sales': 0.0005, 'purchase': 0.0, 'short_redeem': 0.001}
+    t_c2 = rules._tco_score({'fees': '管理0.5%，短期赎回0.5%', 'partner': {'code': 'X', 'fees': pf_c}},
+                            {'rules': {'candidate_holding_years': 2}})
+    t_c5 = rules._tco_score({'fees': '管理0.5%，短期赎回0.5%', 'partner': {'code': 'X', 'fees': pf_c}},
+                            {'rules': {'candidate_holding_years': 5}})
+    check('G3 TCO partner择优与持有年数', approx(t_c2, 0.65) and t_c2 > t_own and approx(t_c5, 0.2),
+          'c2=%s c5=%s' % (t_c2, t_c5))
 
 
 def test_portfolio_diagnostics(check):

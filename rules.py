@@ -9,6 +9,8 @@ V3：买入候选评分重构（P0 止血：rf 链/σ下限/平滑检测/完整�
 同类分组 + 组内百分位 + 新权重 边际贡献20/TCO18/风格中性超额17/尾部风险15/稳定性15/可交易性15；
 P2 贝叶斯收缩）、复权列契约 ret_col（main.py 自动接管）、候选硬门槛
 （成立<18月/暂停申购|限大额/规模<2亿 于 cands 过滤处剔除）、换手抑制（held +5 分缓冲）。
+迭代六：评分层数据源增强（data-fetcher 注入 holder/scale_hist/leverage/turnover/partner）：
+稳定性四因子（任期5/规模4/持有人结构3/换手率3）、债基杠杆尾部修正、TCO A/C 份额择优（低者口径生效）。
 """
 import math
 
@@ -807,7 +809,10 @@ def _excess_alpha(pctx, cfg, rf):
 def _tail_risk(pctx):
     """尾部风险：MaxDD 子分（1-abs，复权口径，nav_series 优先）+
     CVaR95 子分（-5% 分位，/0.03 归一）+ 下行波动子分（负收益日标准差，同归一），三部分平均。
-    nav_series 不足 30 日时 MaxDD 回退 pctx.max_dd（'-17.9%'/数值兼容）。"""
+    nav_series 不足 30 日时 MaxDD 回退 pctx.max_dd（'-17.9%'/数值兼容）。
+    迭代六 债基杠杆修正：pctx.leverage 存在且 >1.2 → 尾部子分 ×0.7；1.1 < leverage ≤ 1.2 → ×0.85；
+    ≤1.1 或缺失 → 不修正。债基专项：正回购加杠杆放大尾部风险（久期/信用暴露同比例放大）；
+    波动率对信用尾部失效的近似对冲（高杠杆债基净值波动不足以反映信用尾部 → 直接折价）。"""
     parts = []
     rets = _rets(pctx)
     if rets is not None and len(rets) >= 30:
@@ -829,7 +834,19 @@ def _tail_risk(pctx):
             parts.append(max(0.0, min(1.0, 1.0 - abs(mdd))))
     if not parts:
         return None
-    return sum(parts) / len(parts)
+    s = sum(parts) / len(parts)
+    lev = pctx.get('leverage')
+    if lev is not None:
+        try:
+            lev = float(lev)
+        except Exception:
+            lev = None
+        if lev is not None and lev == lev:
+            if lev > 1.2:
+                s *= 0.7
+            elif lev > 1.1:
+                s *= 0.85
+    return max(0.0, min(1.0, s))
 
 _TCO_PATTERNS = (
     ('管理费', r'管理费([\d.]+)%'),
@@ -846,8 +863,14 @@ _TCO_PATTERNS = (
 def _tco_score(pctx, cfg):
     """TCO（总持有成本）：(管理+托管+销售服务)×持有年数 + 申购费 + 持有期赎回费。
     量纲契约：接口边界写死小数口径——解析出的百分数一律 /100 转小数（失败项跳过）；
-    满分基准 2%：score = 1 - min(1, 合计/0.02)，clamp 0-1。
-    持有年数默认 2（cfg.rules.candidate_holding_years 可配）。A/C 份额择优不自动做（config 人工选）。"""
+    满分基准 2%：score = max(0, min(1, 1 - min(1, 合计/0.02)))。
+    持有年数默认 2（cfg.rules.candidate_holding_years 可配，float 兜底）。
+    迭代六 A/C 份额择优：本产品 total（现有解析逻辑，缺失字段 0）与 pctx.partner 结构化费率
+    （fees: mgmt/trustee/sales/purchase/short_redeem，小数口径）partner_total =
+    (mgmt+trustee+sales)×持有年数 + purchase + short_redeem 取 min 作为 TCO 口径——
+    两档同为总成本尺度（满分基准 0.02 不变），持有期口径更优份额自动胜出（已按 X 年持有期
+    在 A/C 份额间择优）；partner 缺失/fees 非 dict → 忽略该档（行为=旧行为）；
+    本产品无费率但 partner 存在 → 用 partner 口径。"""
     import re
     ongoing, one_time = [], []
     fees_txt = str(pctx.get('fees') or '')
@@ -881,8 +904,6 @@ def _tco_score(pctx, cfg):
                         one_time.append(v / 100.0 if v > 1.0 else v)
                 except Exception:
                     pass
-    if not ongoing and not one_time:
-        return None
     years = 2.0
     try:
         y = float((cfg.get('rules') or {}).get('candidate_holding_years', 2.0))
@@ -890,9 +911,33 @@ def _tco_score(pctx, cfg):
             years = y
     except Exception:
         pass
-    total = sum(ongoing) * years + sum(one_time)
+    own_total = sum(ongoing) * years + sum(one_time) if (ongoing or one_time) else None
+    partner_total = None
+    try:
+        pr = pctx.get('partner')
+        if isinstance(pr, dict):
+            fees = pr.get('fees')
+            if isinstance(fees, dict):
+                f = {}
+                for kk in ('mgmt', 'trustee', 'sales', 'purchase', 'short_redeem'):
+                    try:
+                        v = float(fees.get(kk) or 0.0)
+                    except Exception:
+                        v = 0.0
+                    f[kk] = v if v == v else 0.0
+                partner_total = (f['mgmt'] + f['trustee'] + f['sales']) * years \
+                    + f['purchase'] + f['short_redeem']
+    except Exception:
+        partner_total = None
+    if own_total is None and partner_total is None:
+        return None
+    if own_total is None:
+        total = partner_total
+    elif partner_total is not None and partner_total < own_total:
+        total = partner_total  # A/C 择优：partner 档总成本更低 → 以 partner 口径计分（低者生效）
+    else:
+        total = own_total
     return max(0.0, min(1.0, 1.0 - min(1.0, total / 0.02)))
-
 
 def _marginal_contribution(pctx):
     """边际贡献：0.5×(1−与组合其他产品复权收益相关性均值) + 0.5×(1−top10 重合率)。
@@ -939,13 +984,95 @@ def _marginal_contribution(pctx):
     return 0.5 * half1 + 0.5 * half2
 
 
+def _scale_hist_latest(pctx):
+    """scale_hist 最新报告期 → (net_assets 亿元, change_rate 小数变动率)；缺失/非法 → (None, None)。
+    报告期升序（point-in-time），取末位为最新期。"""
+    try:
+        hist = pctx.get('scale_hist')
+        if not isinstance(hist, list) or not hist:
+            return None, None
+        last = hist[-1]
+        if not isinstance(last, dict):
+            return None, None
+        na = last.get('net_assets')
+        if na is not None:
+            try:
+                na = float(na)
+                if na != na:
+                    na = None
+            except Exception:
+                na = None
+        cr = last.get('change_rate')
+        if cr is not None:
+            try:
+                cr = float(cr)
+                if cr != cr:
+                    cr = None
+            except Exception:
+                cr = None
+        return na, cr
+    except Exception:
+        return None, None
+
+
+def _holder_subscore(pctx):
+    """持有人结构子分（0-1）：holder.inst_ratio ≥0.9 → 0.3（机构定制，大额赎回风险）；
+    0.1-0.9 → 1.0；<0.1 → 0.6（个人集中）；holder 缺失 → 0.7（中性）。"""
+    try:
+        h = pctx.get('holder')
+        if not isinstance(h, dict):
+            return 0.7
+        ir = h.get('inst_ratio')
+        if ir is None:
+            return 0.7
+        ir = float(ir)
+        if ir != ir:
+            return 0.7
+        if ir >= 0.9:
+            return 0.3
+        if ir >= 0.1:
+            return 1.0
+        return 0.6
+    except Exception:
+        return 0.7
+
+
+def _turnover_subscore(pctx):
+    """换手率子分（0-1）：turnover.value >3.0 → 0.4（高换手/风格漂移）；1.0-3.0 → 0.7；
+    <1.0 → 1.0；缺失 → 0.7（中性）。"""
+    try:
+        t = pctx.get('turnover')
+        if not isinstance(t, dict):
+            return 0.7
+        v = t.get('value')
+        if v is None:
+            return 0.7
+        v = float(v)
+        if v != v:
+            return 0.7
+        if v > 3.0:
+            return 0.4
+        if v >= 1.0:
+            return 0.7
+        return 1.0
+    except Exception:
+        return 0.7
+
+
 def _stability(pctx):
-    """运作稳定性（15 分维度）：经理任期三态 10 分 + 规模适配 5 分。
+    """运作稳定性（15 分维度）四因子：任期5 + 规模4 + 持有人结构3 + 换手率3，加权平均 → 0-1 子分。
     任期：state_store.manager_tenure_days(code, config_since=manager_since) ≥12月 → 1.0；
     <12月（已知短任期）→ 0.85；未知 → 0.95。
-    规模：指数/ETF/LOF 类越大越好（<5亿 0.4；5-50亿 0.6→1.0 线性；>50亿 1.0）；
-    主动类容量曲线（50-300 亿满分区，同 _piecewise）；规模缺失 → 0.5 中性。
-    注：规模数据为季报口径（滞后 1-3 个月），仅注释说明不参与打分。"""
+    规模：类型分叉曲线（指数/ETF/LOF 类越大越好：<5亿 0.4、5-50亿 0.6→1.0 线性、>50亿 1.0；
+    主动类容量曲线：50-300 亿满分区、>600亿 0.6，同 _piecewise）；规模缺失 → 0.5 中性。
+    数据源：scale_hist 最新期 net_assets（亿元）优先，无 scale_hist 回退 scale 字段解析
+    （季报口径滞后 1-3 个月，仅注释说明不参与打分）。
+    规模变动监测：最新期 change_rate > 1.0（翻倍突增）或 < -0.3（骤降 30%）→ 规模子分 ×0.7
+    （大额申赎扰动：流动性冲击/清仓风险/收益摊薄，稳定性折价）。
+    持有人：holder.inst_ratio ≥0.9 → 0.3（机构定制，大额赎回风险）；0.1-0.9 → 1.0；<0.1 → 0.6
+    （个人集中）；holder 缺失 → 0.7（中性）。
+    换手：turnover.value >3.0 → 0.4（高换手/风格漂移）；1.0-3.0 → 0.7；<1.0 → 1.0；缺失 → 0.7（中性）。
+    各因子缺失用中性兜底值，恒返回 0-1 数值（数据全缺 → 0.73 中性；完整度门槛由 score_candidate 把关）。"""
     code = str(pctx.get('code') or '').strip()
     mgr_since = pctx.get('manager_since')
     days = None
@@ -954,11 +1081,11 @@ def _stability(pctx):
         days = state_store.manager_tenure_days(code, config_since=mgr_since)
     except Exception:
         days = None
-    avail = (days is not None) or bool(code) or bool(mgr_since)
     tenure = 1.0 if (days is not None and days >= 365) else (0.85 if days is not None else 0.95)
-    scale = _parse_scale(pctx.get('scale'))
-    if scale is not None:
-        avail = True
+    # ---- 规模：scale_hist 最新期 net_assets 优先，回退 scale 字段解析 ----
+    scale, chg = _scale_hist_latest(pctx)
+    if scale is None:
+        scale = _parse_scale(pctx.get('scale'))
     if scale is None:
         scale_s = 0.5
     else:
@@ -968,10 +1095,12 @@ def _stability(pctx):
         else:
             scale_s = _piecewise(scale, [(0.0, 0.0), (1.0, 0.2), (5.0, 0.8),
                                          (50.0, 1.0), (300.0, 1.0), (600.0, 0.6), (2000.0, 0.2)])
-    if not avail:
-        return None
-    return (10.0 * tenure + 5.0 * scale_s) / 15.0
-
+        if chg is not None and (chg > 1.0 or chg < -0.3):
+            scale_s *= 0.7  # 规模变动监测：大额申赎扰动（翻倍突增/骤降 30%）→ 稳定性折价
+    scale_s = max(0.0, min(1.0, scale_s))
+    holder_s = _holder_subscore(pctx)
+    turnover_s = _turnover_subscore(pctx)
+    return (5.0 * tenure + 4.0 * scale_s + 3.0 * holder_s + 3.0 * turnover_s) / 15.0
 
 def _tradability(pctx):
     """可交易性：申购状态 + 日限额 + 最短持有期（费率表），三部分平均。

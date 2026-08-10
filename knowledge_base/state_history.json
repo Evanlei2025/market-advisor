@@ -151,5 +151,58 @@
     "storm_active": false,
     "eq_target": null,
     "client": "NULL_Xue"
+  },
+  {
+    "date": "2026-08-10",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Echo_Wang"
+  },
+  {
+    "date": "2026-08-10",
+    "orders": [],
+    "target_alloc": {
+      "equity": 0.3,
+      "bond": 0.6,
+      "cash": 0.1
+    },
+    "pending_cash": [],
+    "total_mv": 2504.076945,
+    "tp_signals": [
+      {
+        "code": "006195",
+        "action": "tp_dd"
+      }
+    ],
+    "storm_active": false,
+    "eq_target": 0.3,
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-10",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Harley_Lei"
+  },
+  {
+    "date": "2026-08-10",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "NULL_Xue"
   }
 ]

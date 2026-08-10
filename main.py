@@ -11,6 +11,8 @@ import sys
 import time
 import traceback
 from datetime import date, datetime
+import html
+import io
 
 import pandas as pd
 import requests
@@ -129,6 +131,15 @@ class DataFetcher:
         self.session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
         self._top10_cache = {}  # 基金重仓股进程内缓存 {fund_code: list|None}（A4）
         self._purchase_cache = None  # 全市场申赎状态表缓存（A7：进程内只拉一次）
+        self._holder_cache = {}  # 持有人结构缓存 {fund_code: dict|None}
+        self._scale_cache = {}  # 规模历史缓存 {fund_code: list|None}
+        self._leverage_cache = {}  # 债基杠杆缓存 {fund_code: float|None}
+        self._leverage_detail = {}  # 杠杆明细 {fund_code: {repo, period}}
+        self._turnover_cache = {}  # 换手率缓存 {fund_code: dict|None}
+        self._partner_cache = {}  # A/C 配对缓存 {fund_code: partner|None}
+        self._fees_cache = {}  # 份额费率缓存 {fund_code: dict|None}
+        self._partner_info_cache = {}  # 配对+费率缓存 {fund_code: {code, fees}|None}
+        self._fund_name_df = None  # 全市场份额列表缓存（fund_name_em 一次拉取）
 
     def index_daily(self, tx_symbol, days=320):
         try:
@@ -320,6 +331,287 @@ class DataFetcher:
         self._top10_cache[fund_code] = None
         return None
 
+    # ---- 迭代六：持有人结构 / 规模历史 / 债基杠杆 / 换手率 / A-C 份额配对（全部静默降级，进程内缓存） ----
+    @staticmethod
+    def _f10_pct(v):
+        # F10 百分比解析：---/NaN/空 -> None；10.42% -> 0.1042（小数）
+        try:
+            if v is None or v != v:
+                return None
+            s = str(v).strip().replace('%', '').replace(',', '')
+            if s in ('', '---', 'nan', 'None'):
+                return None
+            return float(s) / 100.0
+        except (TypeError, ValueError):
+            return None
+    @staticmethod
+    def _f10_num(v):
+        # F10 数值解析：---/NaN/空 -> None；740,194,641.92 -> 740194641.92
+        try:
+            if v is None or v != v:
+                return None
+            s = str(v).strip().replace(',', '')
+            if s in ('', '---', 'nan', 'None'):
+                return None
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+    def _f10_table(self, fund_code, ftype, extra=''):
+        # 天天基金 F10 底层接口：FundArchivesDatas.aspx?type=<ftype>&code=<code><extra>&rt=<random>
+        # 必须带 Referer 头（否则 404）；返回体为 JS 变量包裹的 HTML 片段（content 字段）-> pandas.read_html。失败返回 None。
+        try:
+            url = ('https://fundf10.eastmoney.com/FundArchivesDatas.aspx' 
+                   '?type=%s&code=%s%s&rt=%d' % (ftype, fund_code, extra, int(time.time() * 1000)))
+            headers = {'Referer': 'https://fundf10.eastmoney.com/%s_%s.html' % (ftype, fund_code),
+                       'User-Agent': self.session.headers.get('User-Agent', 'Mozilla/5.0')}
+            r = self.session.get(url, headers=headers, timeout=15)
+            m = re.search('content:"(.*?)"', r.text, re.S)
+            if not m or '<table' not in m.group(1):
+                m = re.search('content:"(<table.*?</table>)"', r.text, re.S)
+            if not m:
+                return None
+            c = m.group(1).replace(chr(92) + chr(39), chr(39)).replace(chr(92) + chr(34), chr(34))
+            c = html.unescape(c)
+            if '<table' not in c:
+                return None
+            tables = pd.read_html(io.StringIO(c))
+            return tables if tables else None
+        except Exception:
+            return None
+    def holder_structure(self, fund_code):
+        # 持有人结构（F10 type=cyrjg，半年报披露）：返回最新一期 dict 或 None
+        # 字段 report_date/inst_ratio/personal_ratio/internal_ratio（比例均为小数；--- 缺失 -> None）
+        if fund_code in self._holder_cache:
+            return self._holder_cache[fund_code]
+        out = None
+        try:
+            tables = self._f10_table(fund_code, 'cyrjg')
+            if tables:
+                df = tables[0]
+                c_date = _pick_cols(df, '公告日期')
+                c_inst = _pick_cols(df, '机构持有比例')
+                c_pers = _pick_cols(df, '个人持有比例')
+                c_int = _pick_cols(df, '内部持有比例')
+                if c_date and c_inst and c_pers and c_int and len(df) > 0:
+                    row = df.iloc[0]  # 倒序：最新报告期在第一行
+                    out = {'report_date': str(row[c_date])[:10],
+                           'inst_ratio': self._f10_pct(row[c_inst]),
+                           'personal_ratio': self._f10_pct(row[c_pers]),
+                           'internal_ratio': self._f10_pct(row[c_int])}
+        except Exception:
+            out = None
+        self._holder_cache[fund_code] = out
+        return out
+    def scale_history(self, fund_code):
+        # 规模历史（F10 type=gmbd，季度）：返回全量升序序列或 None
+        # 元素 {date, net_assets, shares, change_rate}（亿元/亿份/小数变动率）
+        # 历史行固定不回改（天然 point-in-time）；仅最新行随披露刷新
+        if fund_code in self._scale_cache:
+            return self._scale_cache[fund_code]
+        out = None
+        try:
+            tables = self._f10_table(fund_code, 'gmbd')
+            if tables:
+                df = tables[0]
+                c_date = _pick_cols(df, '日期')
+                c_sh = _pick_cols(df, '期末总份额（亿份）', '期末总份额')
+                c_na = _pick_cols(df, '期末净资产（亿元）', '期末净资产')
+                c_cr = _pick_cols(df, '净资产变动率')
+                if c_date and c_na:
+                    rows = []
+                    for _, r in df.iterrows():
+                        d = str(r[c_date]).strip()[:10]
+                        if not re.match(r'^\d{4}-\d{2}-\d{2}$', d):
+                            continue
+                        rows.append({'date': d,
+                                     'net_assets': self._f10_num(r[c_na]),
+                                     'shares': self._f10_num(r[c_sh]) if c_sh else None,
+                                     'change_rate': self._f10_pct(r[c_cr]) if c_cr else None})
+                    rows = [x for x in rows if x.get('net_assets') is not None]
+                    if rows:
+                        rows.sort(key=lambda x: x['date'])
+                        out = rows
+        except Exception:
+            out = None
+        self._scale_cache[fund_code] = out
+        return out
+    def bond_leverage(self, fund_code):
+        # 债基杠杆（F10 type=zcfzb&showtype=1&year=<当年>）：杠杆率 = 最近报告期 资产总计/所有者权益合计（小数）
+        # 注意 showtype=0 只返回科目名空表，必须 showtype=1；卖出回购金融资产款（正回购来源）存 _leverage_detail
+        if fund_code in self._leverage_cache:
+            return self._leverage_cache[fund_code]
+        leverage = None
+        try:
+            extra = '&showtype=1&year=%d' % datetime.now().year
+            tables = self._f10_table(fund_code, 'zcfzb', extra)
+            if tables:
+                df = pd.concat(tables, ignore_index=True)
+                date_cols = [c for c in df.columns if re.match(r'^\d{4}-\d{2}-\d{2}$', str(c))]
+                item_cols = [c for c in df.columns if c not in date_cols]
+                if date_cols and item_cols:
+                    latest = date_cols[0]  # 表按报告期倒序，首列为最新
+                    items = df[item_cols].fillna('').astype(str)
+                    item = items.apply(lambda r: ''.join(str(v) for v in r), axis=1)
+                    def row_val(key):
+                        m = df.loc[item == key, latest]
+                        if len(m) == 0:
+                            return None
+                        return self._f10_num(m.iloc[0])
+                    assets = row_val('资产总计')
+                    equity = row_val('所有者权益合计')
+                    repo = row_val('卖出回购金融资产款')
+                    if assets is not None and equity and equity > 0:
+                        leverage = assets / equity
+                        self._leverage_detail[fund_code] = {
+                            'repo': repo, 'period': latest,
+                            'assets': assets, 'equity': equity}
+        except Exception:
+            leverage = None
+        self._leverage_cache[fund_code] = leverage
+        return leverage
+    def _portfolio_change(self, fund_code, indicator, year):
+        # fund_portfolio_change_em 容错包装：当年未披露返回空表并 KeyError -> None
+        try:
+            df = self.ak.fund_portfolio_change_em(symbol=fund_code, indicator=indicator, date=str(year))
+            if df is None or df.empty or '本期累计买入金额' not in df.columns:
+                return None
+            return df
+        except Exception:
+            return None
+    def turnover(self, fund_code):
+        # 换手率（akshare fund_portfolio_change_em 累计买入/卖出，半年报/年报）：
+        # 取最新披露期（4季度=年报/2季度=半年报）行合计，换手率 = min(买入, 卖出) / 期初净资产；
+        # 期初净资产取 scale_history 同一年份最早报告期；无则用占期初净值比例列合计近似；再不行 None。
+        # 纯债/货币无股票披露 -> None（正常）。返回 {period, value}（value 为倍率小数）或 None
+        if fund_code in self._turnover_cache:
+            return self._turnover_cache[fund_code]
+        out = None
+        try:
+            y = datetime.now().year
+            buy_df = self._portfolio_change(fund_code, '累计买入', y) or self._portfolio_change(fund_code, '累计买入', y - 1)
+            sell_df = self._portfolio_change(fund_code, '累计卖出', y) or self._portfolio_change(fund_code, '累计卖出', y - 1)
+            if buy_df is not None and sell_df is not None and len(buy_df) > 0 and len(sell_df) > 0:
+                def latest_total(d):
+                    q = d['季度'].astype(str).str.extract(r'^(\d{4})年(\d{1,2})季度')
+                    k = pd.to_numeric(q[0], errors='coerce') * 10 + pd.to_numeric(q[1], errors='coerce')
+                    d = d.assign(_k=k).dropna(subset=['_k'])
+                    if d.empty:
+                        return None, None, None
+                    kmax = d['_k'].max()
+                    sub = d[d['_k'] == kmax]
+                    total = float(pd.to_numeric(sub['本期累计买入金额'], errors='coerce').sum())
+                    ratio = None
+                    if '占期初基金资产净值比例' in sub.columns:
+                        ratio = float(pd.to_numeric(sub['占期初基金资产净值比例'], errors='coerce').sum())
+                    return kmax, total, ratio
+                kmax, buy_total, buy_ratio = latest_total(buy_df)
+                _, sell_total, _ = latest_total(sell_df)
+                if kmax is not None and buy_total is not None and sell_total is not None:
+                    beg_nav = None
+                    hist = self.scale_history(fund_code)
+                    yr = int(kmax) // 10
+                    if hist:
+                        same_yr = [h for h in hist if str(h.get('date', '')).startswith(str(yr))]
+                        if same_yr:
+                            beg_nav = same_yr[0].get('net_assets')  # 升序 -> 最早报告期
+                    if beg_nav is None and buy_ratio is not None and buy_ratio > 0:
+                        beg_nav = buy_total / (buy_ratio / 100.0) / 10000.0  # 万元 -> 亿元（占净值比例近似）
+                    if beg_nav is not None and beg_nav > 0:
+                        t = min(buy_total, sell_total) / (beg_nav * 10000.0)
+                        period = '%d年报' % yr if int(kmax) % 10 == 4 else '%d半年报' % yr
+                        out = {'period': period, 'value': round(t, 2)}
+        except Exception:
+            out = None
+        self._turnover_cache[fund_code] = out
+        return out
+    def _fund_name_map(self):
+        # 全市场份额列表（fund_name_em，约 5-7s）：进程内只拉一次；失败 None（配对静默降级）
+        if self._fund_name_df is None:
+            try:
+                df = self.ak.fund_name_em()
+                self._fund_name_df = df if (df is not None and not df.empty and '基金简称' in df.columns) else None
+            except Exception:
+                self._fund_name_df = None
+        return self._fund_name_df
+    def ac_partner(self, fund_code):
+        # A/C 份额配对：按 fund_name_em 简称去 A/C/E 后缀配对同家族其他份额 -> partner code；无 -> None
+        if fund_code in self._partner_cache:
+            return self._partner_cache[fund_code]
+        partner = None
+        try:
+            df = self._fund_name_map()
+            if df is not None:
+                code_s = str(fund_code).strip()
+                row = df[df['基金代码'].astype(str) == code_s]
+                if len(row) > 0:
+                    fam = re.sub(r'[ACE]$', '', str(row.iloc[0]['基金简称']).strip())
+                    if fam:
+                        others = df[df['基金代码'].astype(str) != code_s]
+                        hit = others[others['基金简称'].astype(str).apply(
+                            lambda n: re.sub(r'[ACE]$', '', str(n).strip()) == fam)]
+                        if len(hit) > 0:
+                            partner = str(hit.iloc[0]['基金代码']).strip()
+        except Exception:
+            partner = None
+        self._partner_cache[fund_code] = partner
+        return partner
+    def partner_fees(self, partner_code):
+        # 配对份额费率（雪球 detail_info_xq，与 fund_fees 同源）：
+        # 管理费在「其他费用」含管理费、申购费在「买入规则」首档、赎回费在「卖出规则」<7天档。
+        # 返回 {mgmt, trustee, sales, purchase, short_redeem}（小数，缺失字段 None）；全缺 -> None
+        if partner_code in self._fees_cache:
+            return self._fees_cache[partner_code]
+        out = None
+        try:
+            df = self.ak.fund_individual_detail_info_xq(symbol=partner_code)
+            if df is not None and not df.empty and '费用类型' in df.columns:
+                recs = df.to_dict('records')
+                has_lt7 = any('<7' in str(r.get('条件或名称', '')) for r in recs)
+                fees = {'mgmt': None, 'trustee': None, 'sales': None,
+                        'purchase': None, 'short_redeem': None}
+                for row in recs:
+                    t = str(row.get('费用类型', ''))
+                    cond = str(row.get('条件或名称', ''))
+                    raw = str(row.get('费用', ''))
+                    try:
+                        v = float(raw.replace('%', '').strip()) / 100.0
+                    except (TypeError, ValueError):
+                        continue
+                    if t == '买入规则' and fees['purchase'] is None and v < 0.1:
+                        fees['purchase'] = v  # 首档费率（500万+ 1000元封顶行跳过）
+                    elif t == '卖出规则' and fees['short_redeem'] is None:
+                        if '<7' in cond:
+                            fees['short_redeem'] = v  # <7天档（短期惩罚档）
+                        elif not has_lt7:
+                            fees['short_redeem'] = v  # 无 <7 档 -> 首行兜底
+                    elif t == '其他费用':
+                        if '管理费' in cond:
+                            fees['mgmt'] = v
+                        elif '托管费' in cond:
+                            fees['trustee'] = v
+                        elif '销售服务费' in cond:
+                            fees['sales'] = v
+                if any(v is not None for v in fees.values()):
+                    out = fees
+        except Exception:
+            out = None
+        self._fees_cache[partner_code] = out
+        return out
+    def ac_partner_info(self, fund_code):
+        # TCO 择优数据：{code: partner_code, fees: partner_fees}；配对失败或费率全缺 -> None
+        if fund_code in self._partner_info_cache:
+            return self._partner_info_cache[fund_code]
+        out = None
+        try:
+            pc = self.ac_partner(fund_code)
+            if pc:
+                pf = self.partner_fees(pc)
+                if pf:
+                    out = {'code': pc, 'fees': pf}
+        except Exception:
+            out = None
+        self._partner_info_cache[fund_code] = out
+        return out
     def fund_industry_hhi(self, fund_code):
         """行业集中度 HHI：基金行业配置（证监会大类）前三大权重平方和（归一化）。
         返回 0~1；数据缺失/异常返回 None。"""
@@ -815,6 +1107,12 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map, nav_cache=None):
     achievement = fetch_section(lambda: fetcher.fund_achievement(fcode), f"业绩{fcode}") or []
     profile = fetch_section(lambda: fetcher.fund_profile(fcode), f'资料{fcode}') or {}
     top10 = fetch_section(lambda: fetcher.fund_top10(fcode), f'重仓{fcode}')
+    # ---- 迭代六：持有人结构/规模历史/债基杠杆/换手率/A-C配对（失败静默 None，绝不阻塞） ----
+    ctx['holder'] = fetch_section(lambda: fetcher.holder_structure(fcode), f'持有人{fcode}')
+    ctx['scale_hist'] = fetch_section(lambda: fetcher.scale_history(fcode), f'规模{fcode}')
+    ctx['leverage'] = fetch_section(lambda: fetcher.bond_leverage(fcode), f'杠杆{fcode}')
+    ctx['turnover'] = fetch_section(lambda: fetcher.turnover(fcode), f'换手{fcode}')
+    ctx['partner'] = fetch_section(lambda: fetcher.ac_partner_info(fcode), f'配对{fcode}')
 
     if nav is None or nav.empty or len(nav) < 30:
         return ([f"- {code} {name}: 净值数据不可用"], {**ctx, "unavailable": True})
