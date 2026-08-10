@@ -39,5 +39,19 @@
     "type": "industry",
     "reason": "PE分位82%偏高，但近5日累计上涨8.3%，动量强。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-10",
+    "name": "中证500",
+    "type": "industry",
+    "reason": "中证500 PE分位82%偏高，但近5日累计上涨8.3%，动能强。",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-10",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "上证红利 PE 8.55，分位91%偏高，但股息率有吸引力。",
+    "client": "Evan_Lei"
   }
 ]
