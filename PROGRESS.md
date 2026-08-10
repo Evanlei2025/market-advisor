@@ -105,6 +105,14 @@
 - **A2 数据源审计**：docs/DATA_SOURCE_AUDIT.md（akshare 1.18.81 实测 5 维度）：持有人结构 ✅F10 cyrjg（半年报，675123 机构占比 98.72% 实测）；换手率 ✅fund_portfolio_change_em；债基杠杆 ✅F10 zcfzb（1.008x 实测）/久期信用 ✗降级 config；A/C 份额 ✅fund_name_em+雪球费率表；规模历史 ✅F10 gmbd 季度序列（天然 point-in-time 防重述）。4.5 项纳入迭代六接入候选，统一天天基金 F10 三通道解析器（cyrjg/gmbd/zcfzb）
 - 验证：四测试全绿（15/15+28/28+76/76+23/23）；强制端到端（patch 交易日）经理快照写入验证
 
+### 迭代六·C：矛盾修复 + 详情页目录 + 推送重构（2026-08-10）
+- **Bug 修复（数据源错位）**：「今日一句话」误报「无规则触发」根因 = main.py CRO 构造传了 `tp_actions`（仅今日新动作，repeat 被订单簿去重剔除）而持续信号在 `tp_ctx_map` → 改为合并 tp_ctx_map 构造 tp_sig_ctx（name/action/amount/streak_days）；narrative SIGNAL 分支 amount 为 None 时显示「持续观察中（第 N 天，影子模式，仅记录）」；Evan_Lei 实测一句话变为「止盈信号（观察期）…」+ 触发链 ✓
+- **「今日一句话」hero 卡**（方案 A）：整卡 180° 蓝→白渐变浸入 + 蓝色柔和阴影，blockquote 透明无边框，无硬切（深色 rgba(10,132,255,.30)）
+- **「｜」一律换行**（渲染层）：列表行按「｜」拆段成行（li-line），分位温度条插入所在段尾；段落/表格/blockquote 内换行；区间收益保留 chips 横条卡（用户批准）；md 源与推送保持紧凑
+- **详情页目录结构**：sticky 毛玻璃胶囊目录条（当前章节 IntersectionObserver 高亮）+ 章节折叠手风琴（默认展开「今日一句话/理财产品跟踪/今日跟投指令」其余折叠；点击分组头或目录项展开并平滑滚动；scroll-margin-top 防遮挡；reduced-motion 兼容）
+- **推送重构**：build_compact 仅两板块「理财产品跟踪 + 今日跟投指令」；空用户（无持仓无关注）→ 正文空白仅详情网址；超长 3700 字节保护改为裁剪产品板块细节行（保留规则信号行）；实测正常 2978B / 空用户 / 超长 1372B ✓
+- **回归**：四测试 15/15+28/28+84/84+23/23；5 页面结构闭合；e2e 全量重生成
+
 ### 迭代六·B：网页 iOS 原生级重设计（2026-08-10）
 - **设计规范**：Apple HIG（System Colors / Inset Grouped 卡片 / SF Pro+PingFang / 8pt 间距网格 / 深色模式跟随系统 / 毛玻璃导航条）；学习途径：Apple 官方文档需 JS 无法抓取，基于内化 HIG 规范 + 主流 iOS 财富 App 范式
 - **html_render.py 全面重写**（签名 render(md, title, charts) 不变，main.py 零改动）：

@@ -229,7 +229,12 @@ class CRO:
         elif s == "SIGNAL":
             for code, v in self.i.tp_signals.items():
                 out.append(">")
-                out.append(f"> **止盈信号**：{v.get('name', code)} 建议落袋约 {v.get('amount', 0):,.0f} 元（影子模式，仅记录）")
+                amt = v.get("amount")
+                if amt:
+                    out.append(f"> **止盈信号**：{v.get('name', code)} 建议落袋约 {amt:,.0f} 元（影子模式，仅记录）")
+                else:
+                    n = v.get("streak_days")
+                    out.append(f"> **止盈信号**：{v.get('name', code)} 持续观察中（第 {n} 天，影子模式，仅记录）")
             out.append(">")
             out.append("> 人话：" + RULE_PRINCIPLES.get("TP-YIELD-1", ""))
         elif s == "REGULAR":

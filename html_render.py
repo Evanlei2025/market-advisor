@@ -5,14 +5,17 @@
 设计语言：Apple HIG —— System Colors / Inset Grouped 分组卡片 / 深色模式跟随系统 /
 毛玻璃导航条 / 8pt 间距网格 / tabular-nums 数字 / prefers-reduced-motion。
 
-7.0 大改版：
+7.1 大改版：
 - 设计令牌双主题（CSS 变量，@media prefers-color-scheme 跟随系统）
-- 章节卡片化（h2 分组头 + Inset Grouped 白色圆角卡）
+- 章节卡片化（h2 分组头 + Inset Grouped 白色圆角卡）+ 章节折叠/展开（默认展开
+  「今日一句话/理财产品跟踪/今日跟投指令」其余折叠）+ sticky 胶囊目录条（当前章节高亮）
+- 「今日一句话」整卡蓝色渐变浸入（hero，方案 A：渐变+蓝阴影，无硬切）
 - 文字数据可视化（不改 markdown 内容，纯渲染层解析）：
-  分位温度条（PE/利率/股债性价比等「分位 N%」→ 蓝-橙-红色阶条）
+  分位温度条（PE/利率/股债性价比等「分位 N%」→ 蓝-橙-红色阶条，插入所在段尾）
   区间收益条（产品「近X ±Y%」→ 红涨绿跌横向条）
   组合诊断数字格（波动率/回撤/VaR95 → iOS 健康 App 风格数字卡）
   涨跌着色（🟢/🔴 → 绿/红语义色）、规则信号徽章（✅/👀/⚠️ → 彩色 pill）
+- 「｜」分隔一律换行（列表行拆段成行 / 段落·表格·引用内换行；推送 md 不受影响）
 - Chart.js 深色自适应（脚本读 CSS 变量取色）
 """
 import html as html_lib
@@ -25,7 +28,7 @@ _SEP_ROW = re.compile(r"^\|[\s:|-]+\|$")
 # ---------- 可视化行模式（纯渲染层，不动 markdown） ----------
 # 「分位 N%」首次出现 → 温度条（估值/利率/性价比分位等）
 _FENWEI = re.compile(r"分位\s*(\d{1,3}(?:\.\d+)?)\s*[%％]")
-# 区间收益行：区间收益：近1周 +2.2% ｜ 近1月 -3.9% ...
+# 区间收益行：区间收益：近1周 +2.2% ｜ 近1月 -3.9% ...（该行保留 chips 卡片，不拆段）
 _RET_ROW = re.compile(r"区间收益\s*[：:]\s*(.+)$")
 _RET_ITEM = re.compile(r"(近1周|近1月|近3月|近6月|近1年)\s*([+-]?\d+(?:\.\d+)?)\s*%")
 # 组合诊断数字格：- 年化波动率 8.3%｜人话：...
@@ -44,6 +47,9 @@ _NOTE_P = re.compile(r"^\*(.+)$")
 
 _TERM_ROW = re.compile(r"^\*\*(.+?)\*\*[：:]\s*")
 
+# 默认展开的章节（其余折叠；目录可随时点开）
+_OPEN_GROUPS = {"今日一句话", "理财产品跟踪", "今日跟投指令"}
+
 
 def _pct_hue(n):
     """分位 → 温度色相：0%=210(蓝) … 100%=0(红)，iOS 财富温度约定"""
@@ -55,25 +61,41 @@ def _inline(text):
     t = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
     t = re.sub(r"\*(.+?)\*", r"<em>\1</em>", t)
     t = re.sub(r"`(.+?)`", r"<code>\1</code>", t)
+    t = t.replace("｜", "<br/>")
     return t
 
 
-def _render_li_body(line):
-    """列表行内容：信号徽章 + 涨跌着色 + 分位温度条 + 区间收益条"""
-    raw = line[2:].strip()
-    prefix_html = ""
+def _li_meta(raw):
+    """信号徽章截取：返回 (prefix_html, 剩余 raw)"""
     m = _SIGNAL.search(raw)
-    if m:
-        cls = {"✅": "b-ok", "👀": "b-watch", "⚠️": "b-warn"}.get(m.group(1), "b-warn")
-        prefix_html = "规则信号：<span class='badge %s'>%s</span>" % (cls, _inline(m.group(2)))
-        raw = raw[:m.start()] + raw[m.end():]
-    out = _inline(raw)
-    if prefix_html:
-        out = prefix_html + out
-    out = _UPDOWN.sub(lambda mm: "<span class='ud %s'>%s</span>" % (
-        "up" if mm.group(1) == "🔴" else "dn", mm.group(2)), out)
+    if not m:
+        return "", raw
+    cls = {"✅": "b-ok", "👀": "b-watch", "⚠️": "b-warn"}.get(m.group(1), "b-warn")
+    prefix = "规则信号：<span class='badge %s'>%s</span>" % (cls, _inline(m.group(2)))
+    return prefix, (raw[:m.start()] + raw[m.end():])
+
+
+def _pct_html(seg):
+    """分位温度条 HTML（含分位段的段尾插入）"""
+    m = _FENWEI.search(seg)
+    if not m:
+        return ""
+    n = float(m.group(1))
+    if n > 100:
+        return ""
+    hue = _pct_hue(n)
+    return ("<span class='pct'><span class='pct-fill' "
+            "style='width:%.0f%%;background:hsl(%d,100%%,55%%)'></span></span>"
+            "<span class='pct-num'>%.0f%%</span>" % (n, hue, n))
+
+
+def _render_li_body(line):
+    """列表行内容：徽章 + 涨跌着色 + 「｜」拆段成行 + 分位条（段尾）+ 区间收益 chips"""
+    raw = line[2:].strip()
+    prefix_html, raw = _li_meta(raw)
     m = _RET_ROW.search(raw)
     if m:
+        out = _inline(raw)
         chips = []
         for label, num in _RET_ITEM.findall(m.group(1)):
             v = float(num)
@@ -86,15 +108,16 @@ def _render_li_body(line):
         if chips:
             out = _RET_ROW.sub("", out, count=1)
             out += "<span class='ret-chips'>" + "".join(chips) + "</span>"
-    m = _FENWEI.search(raw)
-    if m:
-        n = float(m.group(1))
-        if n <= 100:
-            hue = _pct_hue(n)
-            out += ("<span class='pct'><span class='pct-fill' "
-                    "style='width:%.0f%%;background:hsl(%d,100%%,55%%)'></span></span>"
-                    "<span class='pct-num'>%.0f%%</span>" % (n, hue, n))
-    return out
+        return prefix_html + out
+    lines = []
+    for seg in (s.strip() for s in raw.split("｜")):
+        if not seg:
+            continue
+        h = _UPDOWN.sub(lambda mm: "<span class='ud %s'>%s</span>" % (
+            "up" if mm.group(1) == "🔴" else "dn", mm.group(2)), _inline(seg))
+        h += _pct_html(seg)
+        lines.append(f"<span class='li-line'>{h}</span>")
+    return prefix_html + "".join(lines)
 
 
 def _render_p(line):
@@ -217,7 +240,7 @@ body {
   border-bottom: .5px solid var(--sep2);
 }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .navbar { background: var(--bg); }
+  .navbar, .toc { background: var(--bg); }
 }
 .nav-inner { max-width: 720px; margin: 0 auto; padding: 10px 20px;
              display: flex; align-items: baseline; gap: 10px; }
@@ -228,23 +251,52 @@ h1 {
   font-size: 34px; line-height: 1.15; font-weight: 700; letter-spacing: -0.3px;
   margin: 10px 4px 4px; padding: 0; border: none;
 }
-.group-h {
-  font-size: 13px; font-weight: 600; color: var(--text3);
-  text-transform: uppercase; letter-spacing: .4px;
-  margin: 26px 8px 8px;
+/* ---------- 目录条（sticky，胶囊横向滚动） ---------- */
+.toc {
+  position: sticky; top: 0; z-index: 9; margin: 0 -16px;
+  background: var(--nav-bg);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8); backdrop-filter: blur(20px) saturate(1.8);
+  border-bottom: .5px solid var(--sep2);
+  overflow-x: auto; white-space: nowrap; scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
+.toc::-webkit-scrollbar { display: none; }
+.toc-inner { max-width: 720px; margin: 0 auto; padding: 8px 16px; display: flex; gap: 6px; }
+.toc-btn {
+  flex: 0 0 auto; border: none; cursor: pointer;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: var(--text2);
+  background: var(--card2); padding: 6px 12px; border-radius: 999px;
+  -webkit-tap-highlight-color: transparent;
+}
+.toc-btn.cur { background: var(--blue); color: #fff; }
+/* ---------- 章节（折叠手风琴） ---------- */
+.group-h {
+  font-size: 15px; font-weight: 600; color: var(--text);
+  margin: 22px 8px 8px; padding: 2px 4px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  -webkit-tap-highlight-color: transparent;
+  scroll-margin-top: 96px;
+  user-select: none;
+}
+.group-h .chev {
+  font-size: 12px; color: var(--text3); transition: transform .25s ease;
+  display: inline-block;
+}
+.group-h.open .chev { transform: rotate(90deg); }
 .group {
   background: var(--card); border-radius: 16px; box-shadow: var(--shadow);
-  overflow: hidden; animation: rise .4s ease both;
+  overflow: hidden; display: none;
+  animation: rise .4s ease both;
+}
+.group.open { display: block; }
+.group.hero {
+  background: linear-gradient(180deg, rgba(0,122,255,.16), var(--card) 82%);
+  box-shadow: 0 2px 10px rgba(0,122,255,.14), 0 10px 28px rgba(0,122,255,.08);
+}
+@media (prefers-color-scheme: dark) {
+  .group.hero { background: linear-gradient(180deg, rgba(10,132,255,.30), var(--card) 82%); }
 }
 @keyframes rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
-.group:nth-child(2) { animation-delay: .05s }
-.group:nth-child(3) { animation-delay: .1s }
-.group:nth-child(4) { animation-delay: .15s }
-.group:nth-child(5) { animation-delay: .2s }
-.group:nth-child(6) { animation-delay: .25s }
-.group:nth-child(7) { animation-delay: .3s }
-.group:nth-child(8) { animation-delay: .35s }
 .group h3 { font-size: 13px; font-weight: 600; color: var(--text3);
             margin: 0; padding: 12px 16px 0; letter-spacing: .2px; }
 .group > p { margin: 0; padding: 10px 16px; }
@@ -252,18 +304,19 @@ h1 {
 .group > p.prod, .group > p.prod + p { border-top: none; }
 ul { list-style: none; margin: 0; padding: 0; }
 li {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; flex-direction: column; gap: 2px;
   padding: 12px 16px; font-size: 15px;
 }
 li + li { border-top: .5px solid var(--sep2); }
-li span:first-child { flex: 1; }
-li .pct { flex: 0 0 auto; width: 88px; height: 6px; border-radius: 999px;
-          background: var(--sep); overflow: hidden; margin-left: 4px; }
+.li-line { display: block; line-height: 1.5; }
+.li-line + .li-line { margin-top: 4px; }
+li .pct { display: inline-block; vertical-align: middle; width: 88px; height: 6px;
+          border-radius: 999px; background: var(--sep); overflow: hidden; margin-left: 6px; }
 li .pct-fill { display: block; height: 100%; border-radius: 999px;
                transition: width .5s ease; }
-li .pct-num { flex: 0 0 auto; min-width: 40px; text-align: right;
-              font-size: 13px; font-weight: 600; color: var(--text3);
-              font-variant-numeric: tabular-nums; }
+li .pct-num { display: inline-block; vertical-align: middle; min-width: 40px;
+              text-align: right; font-size: 13px; font-weight: 600; color: var(--text3);
+              font-variant-numeric: tabular-nums; margin-left: 4px; }
 li .ud { font-weight: 600; font-variant-numeric: tabular-nums; }
 li .ud.up { color: var(--red); }
 li .ud.dn { color: var(--green); }
@@ -273,7 +326,9 @@ strong { font-weight: 600; }
 .b-ok { background: rgba(52,199,89,.14); color: var(--green); }
 .b-watch { background: rgba(255,149,0,.16); color: var(--orange); }
 .b-warn { background: rgba(255,59,48,.13); color: var(--red); }
-.ret-chips { flex: 0 0 auto; display: flex; gap: 12px; align-items: flex-end; margin-left: 4px; }
+.ret-chips { flex: 0 0 auto; display: flex; gap: 14px; align-items: flex-end;
+             margin-top: 6px; padding: 8px 10px; border-radius: 12px;
+             background: var(--card2); align-self: flex-start; }
 .chip { display: flex; flex-direction: column; align-items: center; gap: 3px; }
 .chip b { font-size: 11px; font-weight: 600; color: var(--text2);
           font-variant-numeric: tabular-nums; }
@@ -305,16 +360,10 @@ blockquote {
   background: rgba(0,122,255,.08); color: var(--text);
 }
 .group > blockquote { border-radius: 0; }
-.group > blockquote:first-child {
-  border-left: none; border-radius: 0;
-  background: linear-gradient(135deg, rgba(0,122,255,.14), rgba(10,132,255,.06));
-  padding: 18px 20px; font-size: 16px; font-weight: 500;
+.group.hero > blockquote {
+  border-left: none; background: none; border-radius: 0;
+  padding: 20px; font-size: 17px; font-weight: 600;
 }
-@media (prefers-color-scheme: dark) {
-  .group > blockquote:first-child { background: linear-gradient(135deg, rgba(10,132,255,.22), rgba(10,132,255,.08)); }
-}
-blockquote br { display: none; }
-blockquote br:last-child { display: none; }
 table { border-collapse: collapse; width: 100%; margin: 0; font-size: 14px; }
 thead th {
   font-size: 12px; font-weight: 600; color: var(--text3); text-align: left;
@@ -344,17 +393,60 @@ code { background: var(--card2); padding: 1px 6px; border-radius: 6px; font-size
   h1 { font-size: 30px; }
   .page { padding: 14px 12px 40px; }
   .nav-inner { padding: 10px 12px; }
+  .toc { margin: 0 -12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   body, .group { animation: none; }
   .pct-fill { transition: none; }
+  .group-h .chev { transition: none; }
 }
+"""
+
+_UI_JS = """
+<script>
+document.addEventListener('DOMContentLoaded',function(){
+  var open = {};
+  document.querySelectorAll('.group.open').forEach(function(g){ open[g.id] = 1; });
+  function sync(h){
+    var id = h.id, on = !!open[id];
+    h.classList.toggle('open', on);
+    var g = document.getElementById('g' + id);
+    if (g) g.classList.toggle('open', on);
+  }
+  document.querySelectorAll('.group-h').forEach(function(h){
+    sync(h);
+    h.addEventListener('click', function(){
+      open[h.id] = open[h.id] ? 0 : 1; sync(h);
+    });
+  });
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var btns = document.querySelectorAll('.toc-btn');
+  btns.forEach(function(b){
+    b.addEventListener('click', function(){
+      var h = document.querySelector('.group-h[data-i="' + b.dataset.i + '"]');
+      if (h && !open[h.id]) { open[h.id] = 1; sync(h); }
+      if (h) h.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    });
+  });
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function(es){
+      es.forEach(function(e){
+        if (e.isIntersecting) {
+          btns.forEach(function(b){ b.classList.toggle('cur', b.dataset.i === e.target.dataset.i); });
+        }
+      });
+    }, { rootMargin: '-80px 0px -70% 0px' });
+    document.querySelectorAll('.group-h').forEach(function(h){ io.observe(h); });
+  }
+});
+</script>
 """
 
 
 def render(markdown_text, title="每日投顾报告", charts=None):
-    """markdown → HTML 页面（iOS 原生质感；标题/分组卡片/列表/表格/分隔线/段落/图表/可视化）。"""
+    """markdown → HTML 页面（iOS 原生质感；目录/折叠卡片/列表/表格/分隔线/段落/图表/可视化）。"""
     body = []
+    groups = []
     in_list = False
     in_blockquote = False
     in_code = False
@@ -405,8 +497,16 @@ def render(markdown_text, title="每日投顾报告", charts=None):
     def open_group(heading):
         nonlocal in_group
         close_group()
-        body.append(f'<h2 class="group-h">{_inline(heading)}</h2>')
-        body.append("<div class='group'>")
+        n = len(groups) + 1
+        groups.append(heading)
+        is_open = heading in _OPEN_GROUPS
+        cls = "group-h open" if is_open else "group-h"
+        gcls = "group open" if is_open else "group"
+        if heading == "今日一句话":
+            gcls += " hero"
+        body.append(f'<h2 class="{cls}" id="sec-{n}" data-i="{n}">'
+                    f'{_inline(heading)}<span class="chev">▸</span></h2>')
+        body.append(f"<div class='{gcls}' id='gsec-{n}'>")
         in_group = True
 
     for raw in markdown_text.splitlines():
@@ -503,6 +603,12 @@ def render(markdown_text, title="每日投顾报告", charts=None):
     else:
         brand = title
 
+    toc = ""
+    if groups:
+        toc = ('<nav class="toc"><div class="toc-inner">' + "".join(
+            f'<button type="button" class="toc-btn" data-i="{i}">{html_lib.escape(g)}</button>'
+            for i, g in enumerate(groups, 1)) + "</div></nav>")
+
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -518,10 +624,12 @@ def render(markdown_text, title="每日投顾报告", charts=None):
 <header class="navbar"><div class="nav-inner">
 <span class="nav-brand">{html_lib.escape(brand)}</span><span class="nav-sub">{html_lib.escape(sub)}</span>
 </div></header>
+{toc}
 <div class="page">
 {_charts_html(charts)}
 {''.join(body)}
 </div>
+{_UI_JS}
 </body>
 </html>"""
     return page

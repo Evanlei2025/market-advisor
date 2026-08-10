@@ -1257,13 +1257,18 @@ def split_blocks(report):
     return {k: "\n".join(v) for k, v in blocks.items()}
 
 
-def build_compact(blocks, page_url, date_str):
-    """精简版：客户必看板块（其余细节见网页）。
-    推送字节上限保护（1.3）：超过 3700 字节时按优先级保留核心板块，其余从尾部裁剪。"""
-    want = ["今日一句话", "指标温度表", "今日跟投指令", "决策依据", "理财产品跟踪",
-            "行业与产品关注", "风险观察", "术语速查"]
-    CORE = ["今日一句话", "今日跟投指令"]
+def build_compact(blocks, page_url, date_str, has_products=False):
+    """精简版推送：只列「用户关注的产品 + 今日操作建议」两板块。
+    空用户（无持仓且无关注产品）→ 正文空白，仅剩详情网址。
+    推送字节上限保护（1.3）：超过 3700 字节时从产品板块尾部裁剪。"""
+    want = ["理财产品跟踪", "今日跟投指令"]
+    CORE = ["今日跟投指令"]
     MAX_BYTES = 3700
+
+    if not has_products or not blocks.get("理财产品跟踪", "").strip():
+        return ("# 每日投顾报告（精简版）" + date_str + "\n\n"
+                "📄 完整版报告: " + page_url + "\n"
+                "*本报告由本地程序按固定规则自动生成，仅供参考，不构成投资建议。*")
 
     def assemble(selected):
         o = [f"# 每日投顾报告（精简版）{date_str}", ""]
@@ -1280,11 +1285,19 @@ def build_compact(blocks, page_url, date_str):
 
     selected = [w for w in want if w in blocks and blocks[w].strip()]
     compact = assemble(selected)
-    drop_order = [w for w in reversed(selected) if w not in CORE]
-    while len(compact.encode("utf-8")) > MAX_BYTES and drop_order:
-        drop = drop_order.pop(0)
-        selected = [w for w in selected if w != drop]
-        compact = assemble(selected)
+    # 超长裁剪：先整体去掉产品板块细节行（仅保留「规则信号」状态行），仍超则裁掉产品板块
+    while len(compact.encode("utf-8")) > MAX_BYTES:
+        prod = blocks.get("理财产品跟踪", "")
+        kept = [ln for ln in prod.splitlines() if ln.startswith("- 规则信号") or ln.startswith("**")]
+        if kept and kept != prod.splitlines():
+            blocks["理财产品跟踪"] = "\n".join(kept)
+            compact = assemble(selected)
+            continue
+        if "理财产品跟踪" in selected:
+            selected = [w for w in selected if w != "理财产品跟踪"]
+            compact = assemble(selected)
+            continue
+        break
     if len(compact.encode("utf-8")) > MAX_BYTES:
         compact += "\n\n⚠️ 推送内容超长，已自动裁剪，完整报告请查看 GitHub Pages"
     return compact
@@ -2045,13 +2058,26 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
 
         # ---- CRO 叙事 ----
         bond_codes = {p.get("code", "") for p in products if p.get("type") == "bond"}
+        # 止盈信号（含持续中 repeat）：tp_ctx_map 是当日完整信号集合（新触发+持续中），
+        # tp_actions 仅今日新动作（repeat 被订单簿去重剔除）——若只传 tp_actions，
+        # CRO 会漏掉持续信号导致「今日一句话」误报"无规则触发"
+        tp_sig_ctx = {}
+        _pname_map = {p.get("code", ""): p.get("name", p.get("code", "")) for p in products}
+        for _c, _v in tp_ctx_map.items():
+            _a = tp_actions.get(_c)
+            tp_sig_ctx[_c] = {
+                "name": (_a or {}).get("name") or _pname_map.get(_c, _c),
+                "action": _v.get("action"),
+                "amount": (_a or {}).get("amount"),
+                "streak_days": state_store.tp_streak_days(_c, client=client_id),
+            }
         cro = narrative.CRO(narrative.CROInput(
             orders=orders, equity_target=eq_target, storm_active=storm_active,
             storm_reasons=storm_reasons, ep_lock=ep_lock,
             ep_pctile=ctx.get("ep_premium_pctile"),
             ep_thr=ep_thr,
             triggers=rule_triggers, product_sells=product_sells,
-            tp_signals=tp_actions, cooldown_active=cooldown_active,
+            tp_signals=tp_sig_ctx, cooldown_active=cooldown_active,
             bond_codes=bond_codes))
         storm_line = cro.get_storm_status_line()
         if storm_line:
@@ -2421,7 +2447,7 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
     if not push_off:
         channel = cfg.get("push", {}).get("channel", "none")
         blocks = split_blocks(report_full)
-        compact = build_compact(blocks, page_url_for(client_id), today)
+        compact = build_compact(blocks, page_url_for(client_id), today, has_products=bool(products))
         if channel == "wecom":
             push_wecom(cfg["push"]["wecom_webhook"], title, compact)
         elif channel == "serverchan":
