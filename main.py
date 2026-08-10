@@ -1202,7 +1202,8 @@ def analyze_product(fetcher, p, cfg_ref, bench_pctile_map, nav_cache=None):
             if conv_pos is None:
                 conv_pos = 0.0
             equity_exposure = stock_pos + conv_pos * conv_ratio
-            if ptype == "equity" and stock_pos < 0.01:
+            if ptype == "equity" and stock_pos < 0.3:
+                # ETF 联接/指数基金的股票仓位披露不全（常解析出 0~2%），equity 类兜底 0.8
                 equity_exposure = max(equity_exposure, 0.8)
         except Exception:
             equity_exposure = None
