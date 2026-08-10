@@ -105,6 +105,15 @@
 - **A2 数据源审计**：docs/DATA_SOURCE_AUDIT.md（akshare 1.18.81 实测 5 维度）：持有人结构 ✅F10 cyrjg（半年报，675123 机构占比 98.72% 实测）；换手率 ✅fund_portfolio_change_em；债基杠杆 ✅F10 zcfzb（1.008x 实测）/久期信用 ✗降级 config；A/C 份额 ✅fund_name_em+雪球费率表；规模历史 ✅F10 gmbd 季度序列（天然 point-in-time 防重述）。4.5 项纳入迭代六接入候选，统一天天基金 F10 三通道解析器（cyrjg/gmbd/zcfzb）
 - 验证：四测试全绿（15/15+28/28+76/76+23/23）；强制端到端（patch 交易日）经理快照写入验证
 
+### 迭代六·F：云端同步修复 + Echo_Wang 导入关注池 + akshare 超时保护（2026-08-10）
+- **云端旧版根因**：workflow 仅 cron（工作日 15:35 北京）+ dispatch，push 不触发重建 → 云端 Pages 停留在 08-07 旧版；修复：workflow 增加 `on: push`（paths 过滤 **.py/requirements/.github，kb 数据 commit 不触发防循环）
+- **云端 secret 同步**：git credential token + GitHub API（libsodium 加密 PUT ADVISOR_CONFIG + workflow dispatch）；本地 config.json 与云端 secret 保持一致
+- **Echo_Wang 关注池导入**：009051 易方达中证红利ETF联接发起式A / 110020 易方达沪深300ETF联接A / 160119 南方中证500ETF联接(LOF)A / 588080 科创50ETF易方达 / 050025 博时标普500ETF联接A（全部 equity + observe）；test_clients「空壳」断言更新为 5 产品
+- **akshare 统一超时保护**：`DataFetcher._ak` 线程包装（90s 超时，30 处调用批量替换）——ak 内部 requests 无 timeout，云端网络下曾挂死 45min+（dispatch 运行取消）；超时由 fetch_section 重试降级；云端运行恢复 ~10min
+- **修复**：160119 股票仓位披露不全（1.8%）被推导为「债券型」——equity 类 stock_pos<0.3 兜底 0.8（ETF 联接披露特性）
+- 云端 Pages 验证：Echo_Wang 5 产品全展示（净值/区间收益/回撤/排名/费用/信号）；Evan_Lei 新版样式（目录/蓝卡/观察文案）；采集 201 项 197 成功 4 降级（016347/588080 雪球资料 KeyError 既有）
+- 回归：四测试 15/15+28/28+84/84+23/23
+
 ### 迭代六·E：宽度贴合 + 卡片底部白条修复（2026-08-10）
 - **宽度**：page/nav-inner/toc-inner `max-width: 720px` → `width: min(100% - 40px, 1150px)`（桌面 1150 居中填充左右空白，略小于视口不超宽；中间尺寸自适应；移动端 `100% - 24px` 近全宽）；toc 负 margin 删除
 - **白条修复**：根因 = 空 markdown 行渲染 `<p></p>`（组卡片底部产生 20px 白色条，实测 16 处）；修复：空行不再输出占位 p（保留块状态关闭逻辑）+ CSS `.group > p:empty { display: none }` 双保险；实测温度表组尾部蓝色 blockquote 直接贴合卡片圆角，0 残留
