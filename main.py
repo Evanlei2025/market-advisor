@@ -24,6 +24,7 @@ import narrative
 import news_alert
 import rules
 import state_store
+import aktime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -145,22 +146,7 @@ class DataFetcher:
     def _ak(self, fn, *args, timeout=90, **kwargs):
         """akshare 调用统一超时保护（ak 内部 requests 无 timeout，云端网络下可能挂死）。
         超时/异常原样抛出，由 fetch_section 重试与降级处理。"""
-        out = {}
-
-        def _run():
-            try:
-                out["r"] = fn(*args, **kwargs)
-            except Exception as e:
-                out["e"] = e
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
-            raise TimeoutError("ak.%s timeout>%ss" % (getattr(fn, "__name__", "?"), timeout))
-        if "e" in out:
-            raise out["e"]
-        return out["r"]
+        return aktime.call_with_timeout(fn, timeout, *args, **kwargs)
 
     def index_daily(self, tx_symbol, days=320):
         try:
@@ -245,6 +231,8 @@ class DataFetcher:
             df = self._ak(self.ak.stock_index_pe_lg, symbol=symbol)
             if df is not None and not df.empty:
                 return df
+        except TimeoutError:
+            raise
         except Exception:
             pass
         return None
@@ -294,6 +282,8 @@ class DataFetcher:
                 return 0.0
             mask = df["债券名称"].astype(str).str.contains("转债", na=False)
             return float(df.loc[mask, "占净值比例"].sum()) / 100.0
+        except TimeoutError:
+            raise
         except Exception:
             return 0.0
 
@@ -497,6 +487,8 @@ class DataFetcher:
             if df is None or df.empty or '本期累计买入金额' not in df.columns:
                 return None
             return df
+        except TimeoutError:
+            raise
         except Exception:
             return None
     def turnover(self, fund_code):
@@ -650,6 +642,8 @@ class DataFetcher:
             w = (w / total).sort_values(ascending=False)
             top3 = w.head(3)
             return float((top3 ** 2).sum())
+        except TimeoutError:
+            raise
         except Exception:
             return None
 
@@ -824,7 +818,7 @@ class DataFetcher:
         # 旧实现取到 2008-01 的 7.08%，正是用户看到的 +7.1% 假数据。
         # 合理性校验：|value| > 15 或 NaN → None（防脏数据误报）。
         try:
-            df = getattr(self.ak, ak_fn)()
+            df = self._ak(getattr(self.ak, ak_fn))
             col = [c for c in df.columns if col_filter(c)]
             if not col or date_col not in df.columns:
                 return None
@@ -919,6 +913,10 @@ def fetch_section(fn, name):
             return r
         except Exception as e:
             _mark_fetch(name, False, f"{type(e).__name__}")
+            if isinstance(e, TimeoutError):
+                # 接口永久挂死（超时）：重试大概率同样挂死，直接降级，不浪费 3×90s
+                log(f"[WARN] {name} 超时({str(e)[:60]})，跳过重试直接降级")
+                break
             if attempt < FETCH_RETRY:
                 log(f"[WARN] {name} 第{attempt}次失败({type(e).__name__})，重试中...")
                 time.sleep(FETCH_RETRY_WAIT)
@@ -2505,7 +2503,7 @@ def is_trading_day():
     if TRADE_CAL_CACHE is None:
         try:
             import akshare as ak
-            df = ak.tool_trade_date_hist_sina()
+            df = aktime.call_with_timeout(ak.tool_trade_date_hist_sina, timeout=90)
             TRADE_CAL_CACHE = set(df["trade_date"].astype(str))
         except Exception as e:
             log(f"[WARN] 交易日历获取失败({type(e).__name__}: {str(e)[:60]})，不阻塞运行")

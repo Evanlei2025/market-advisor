@@ -464,7 +464,8 @@ def add_trading_days(start_date, n):
     from datetime import timedelta
     try:
         import akshare as ak
-        df = ak.tool_trade_date_hist_sina()
+        import aktime
+        df = aktime.call_with_timeout(ak.tool_trade_date_hist_sina, timeout=90)
         cal = sorted(df["trade_date"].astype(str))
         if str(start_date) not in cal:
             import bisect

@@ -115,9 +115,9 @@ def build_entity_table(fetcher, products, cfg, product_ctxs=None):
             except Exception as e:
                 log.warning("top10 重仓股实体注册失败 %s: %s", fcode, str(e)[:80])
         if not registered:
-            # 旧路径：akshare 拉取（top10 缺失时行为与旧版完全一致）
+            # 旧路径：akshare 拉取（top10 缺失时行为与旧版完全一致；带超时防挂死）
             try:
-                df = fetcher.ak.fund_portfolio_hold_em(symbol=fcode, date=str(datetime.now().year))
+                df = fetcher._ak(fetcher.ak.fund_portfolio_hold_em, symbol=fcode, date=str(datetime.now().year))
                 if df is not None and not df.empty and "股票名称" in df.columns:
                     for name in df["股票名称"].head(10).astype(str):
                         if name and name not in ("nan", "None"):
@@ -125,7 +125,7 @@ def build_entity_table(fetcher, products, cfg, product_ctxs=None):
             except Exception as e:
                 log.warning("重仓股实体获取失败 %s: %s", fcode, str(e)[:80])
         try:
-            dfb = fetcher.ak.fund_portfolio_bond_hold_em(symbol=fcode, date=str(datetime.now().year))
+            dfb = fetcher._ak(fetcher.ak.fund_portfolio_bond_hold_em, symbol=fcode, date=str(datetime.now().year))
             if dfb is not None and not dfb.empty and "债券名称" in dfb.columns:
                 for name in dfb["债券名称"].head(10).astype(str):
                     if name and name not in ("nan", "None"):

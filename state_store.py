@@ -147,7 +147,8 @@ def trading_days_between(d1, d2):
     """两日期之间的交易日数（含区间内全部交易日；akshare 日历，失败回退自然日/1.4 近似）"""
     try:
         import akshare as ak
-        df = ak.tool_trade_date_hist_sina()
+        import aktime
+        df = aktime.call_with_timeout(ak.tool_trade_date_hist_sina, timeout=90)
         cal = set(df["trade_date"].astype(str))
         s1, s2 = d1.isoformat(), d2.isoformat()
         if s1 > s2:

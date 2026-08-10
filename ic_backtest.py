@@ -212,7 +212,7 @@ def load_bench(fetcher, symbol, use_cache=True):
     best = None
     for sym in BENCH_CHAIN.get(symbol, [symbol]):
         try:
-            raw = fetcher.ak.stock_zh_index_daily(symbol=sym)
+            raw = fetcher._ak(fetcher.ak.stock_zh_index_daily, symbol=sym)
             if raw is None or raw.empty:
                 continue
             c_date = 'date' if 'date' in raw.columns else raw.columns[0]
