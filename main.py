@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import traceback
 from datetime import date, datetime
@@ -141,6 +142,26 @@ class DataFetcher:
         self._partner_info_cache = {}  # 配对+费率缓存 {fund_code: {code, fees}|None}
         self._fund_name_df = None  # 全市场份额列表缓存（fund_name_em 一次拉取）
 
+    def _ak(self, fn, *args, timeout=90, **kwargs):
+        """akshare 调用统一超时保护（ak 内部 requests 无 timeout，云端网络下可能挂死）。
+        超时/异常原样抛出，由 fetch_section 重试与降级处理。"""
+        out = {}
+
+        def _run():
+            try:
+                out["r"] = fn(*args, **kwargs)
+            except Exception as e:
+                out["e"] = e
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            raise TimeoutError("ak.%s timeout>%ss" % (getattr(fn, "__name__", "?"), timeout))
+        if "e" in out:
+            raise out["e"]
+        return out["r"]
+
     def index_daily(self, tx_symbol, days=320):
         try:
             r = self.session.get(
@@ -159,7 +180,7 @@ class DataFetcher:
         except Exception:
             # 备选源：akshare 指数日线（2.1）
             try:
-                raw = self.ak.stock_zh_index_daily(symbol=tx_symbol)
+                raw = self._ak(self.ak.stock_zh_index_daily, symbol=tx_symbol)
                 if raw is None or raw.empty:
                     return None
                 df = raw.tail(days).reset_index(drop=True)
@@ -221,7 +242,7 @@ class DataFetcher:
     def _pe_lg(self, symbol):
         """乐咕PE（支持：上证50/沪深300/上证380/创业板50/中证500/上证180/深证红利/深证100/中证1000/上证红利/中证100/中证800）"""
         try:
-            df = self.ak.stock_index_pe_lg(symbol=symbol)
+            df = self._ak(self.ak.stock_index_pe_lg, symbol=symbol)
             if df is not None and not df.empty:
                 return df
         except Exception:
@@ -229,7 +250,7 @@ class DataFetcher:
         return None
 
     def bond_rates(self):
-        df = self.ak.bond_zh_us_rate()
+        df = self._ak(self.ak.bond_zh_us_rate, )
         c_date = _pick_cols(df, "日期")
         c_y2 = _pick_cols(df, "中国国债收益率2年")
         c_y10 = _pick_cols(df, "中国国债收益率10年")
@@ -242,7 +263,7 @@ class DataFetcher:
         return df[df["date"] >= cutoff]
 
     def bond_rates_cn(self):
-        df = self.ak.bond_gb_zh_sina(symbol="中国10年期国债")
+        df = self._ak(self.ak.bond_gb_zh_sina, symbol="中国10年期国债")
         df = df[["date", "close"]].dropna()
         df["date"] = pd.to_datetime(df["date"])
         df = df.rename(columns={"close": "y10"})
@@ -268,7 +289,7 @@ class DataFetcher:
 
     def fund_bond_convertible(self, fund_code):
         try:
-            df = self.ak.fund_portfolio_bond_hold_em(symbol=fund_code, date=str(datetime.now().year))
+            df = self._ak(self.ak.fund_portfolio_bond_hold_em, symbol=fund_code, date=str(datetime.now().year))
             if df is None or df.empty or "占净值比例" not in df.columns:
                 return 0.0
             mask = df["债券名称"].astype(str).str.contains("转债", na=False)
@@ -285,7 +306,7 @@ class DataFetcher:
         if fund_code in self._top10_cache:
             return self._top10_cache[fund_code]
         try:
-            df = self.ak.fund_portfolio_hold_em(symbol=fund_code, date=str(datetime.now().year))
+            df = self._ak(self.ak.fund_portfolio_hold_em, symbol=fund_code, date=str(datetime.now().year))
             if df is not None and not df.empty and '季度' in df.columns:
                 d = df.copy()
                 q = d['季度'].astype(str).str.extract(r'(\d{4})年(\d{1,2})季度')
@@ -472,7 +493,7 @@ class DataFetcher:
     def _portfolio_change(self, fund_code, indicator, year):
         # fund_portfolio_change_em 容错包装：当年未披露返回空表并 KeyError -> None
         try:
-            df = self.ak.fund_portfolio_change_em(symbol=fund_code, indicator=indicator, date=str(year))
+            df = self._ak(self.ak.fund_portfolio_change_em, symbol=fund_code, indicator=indicator, date=str(year))
             if df is None or df.empty or '本期累计买入金额' not in df.columns:
                 return None
             return df
@@ -528,7 +549,7 @@ class DataFetcher:
         # 全市场份额列表（fund_name_em，约 5-7s）：进程内只拉一次；失败 None（配对静默降级）
         if self._fund_name_df is None:
             try:
-                df = self.ak.fund_name_em()
+                df = self._ak(self.ak.fund_name_em, )
                 self._fund_name_df = df if (df is not None and not df.empty and '基金简称' in df.columns) else None
             except Exception:
                 self._fund_name_df = None
@@ -563,7 +584,7 @@ class DataFetcher:
             return self._fees_cache[partner_code]
         out = None
         try:
-            df = self.ak.fund_individual_detail_info_xq(symbol=partner_code)
+            df = self._ak(self.ak.fund_individual_detail_info_xq, symbol=partner_code)
             if df is not None and not df.empty and '费用类型' in df.columns:
                 recs = df.to_dict('records')
                 has_lt7 = any('<7' in str(r.get('条件或名称', '')) for r in recs)
@@ -616,8 +637,7 @@ class DataFetcher:
         """行业集中度 HHI：基金行业配置（证监会大类）前三大权重平方和（归一化）。
         返回 0~1；数据缺失/异常返回 None。"""
         try:
-            df = self.ak.fund_portfolio_industry_allocation_em(
-                symbol=fund_code, date=str(datetime.now().year))
+            df = self._ak(self.ak.fund_portfolio_industry_allocation_em, symbol=fund_code, date=str(datetime.now().year))
             if df is None or df.empty or "占净值比例" not in df.columns:
                 return None
             w = df["占净值比例"].astype(float).dropna()
@@ -635,13 +655,13 @@ class DataFetcher:
 
     def gold_daily(self, days=320):
         try:
-            df = self.ak.spot_hist_sge(symbol="Au99.99")
+            df = self._ak(self.ak.spot_hist_sge, symbol="Au99.99")
             df = df[["date", "close"]]
             return df.tail(days).reset_index(drop=True)
         except Exception:
             # 备选源：沪金主力连续（2.1）
             try:
-                df = self.ak.futures_main_sina(symbol="AU0")
+                df = self._ak(self.ak.futures_main_sina, symbol="AU0")
                 if df is None or len(df) < 2:
                     return None
                 df = df[["日期", "收盘价"]].copy()
@@ -653,20 +673,20 @@ class DataFetcher:
                 return None
 
     def cls_news(self):
-        df = self.ak.stock_info_global_cls()
+        df = self._ak(self.ak.stock_info_global_cls, )
         return df[["标题", "内容", "发布时间"]].dropna()
 
     def lpr(self):
-        df = self.ak.macro_china_lpr()
+        df = self._ak(self.ak.macro_china_lpr, )
         return df.iloc[-1]
 
     def usd_cny(self):
-        df = self.ak.fx_spot_quote()
+        df = self._ak(self.ak.fx_spot_quote, )
         row = df[df["货币对"] == "USD/CNY"].iloc[0]
         return float(row["买报价"])
 
     def fund_daily(self, fund_code):
-        df = self.ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+        df = self._ak(self.ak.fund_open_fund_info_em, symbol=fund_code, indicator="单位净值走势")
         df = df[["净值日期", "单位净值", "日增长率"]].tail(3)
         return df.reset_index(drop=True)
 
@@ -674,7 +694,7 @@ class DataFetcher:
         # 复权序列 nav_adj（分红再投资口径）：r_t = (A_t - A_{t-1}) / NAV_{t-1}，A=累计净值，NAV=单位净值
         # 异常护栏：|r_t| > 15% → log 告警并回退 growth/100（growth 为 NaN → 0）；首日 r_t = 0
         # 累计净值拉取失败/全空 → nav_adj = nav（列始终存在，下游无需判列缺失）
-        df = self.ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+        df = self._ak(self.ak.fund_open_fund_info_em, symbol=fund_code, indicator="单位净值走势")
         c_date = _pick_cols(df, "净值日期")
         c_nav = _pick_cols(df, "单位净值")
         c_growth = _pick_cols(df, "日增长率")
@@ -687,7 +707,7 @@ class DataFetcher:
         df = df.reset_index(drop=True)
         df["nav_adj"] = df["nav"]  # 默认降级：复权列 = 单位净值
         try:
-            dfc = self.ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
+            dfc = self._ak(self.ak.fund_open_fund_info_em, symbol=fund_code, indicator="累计净值走势")
             c_cdate = _pick_cols(dfc, "净值日期")
             c_cum = _pick_cols(dfc, "累计净值")
             if c_cdate is not None and c_cum is not None and dfc is not None and not dfc.empty:
@@ -720,7 +740,7 @@ class DataFetcher:
         if self._purchase_cache is None:
             cache = {}
             try:
-                df = self.ak.fund_purchase_em()
+                df = self._ak(self.ak.fund_purchase_em, )
                 if df is not None and not df.empty and "基金代码" in df.columns:
                     def _s(v):
                         return "" if v is None or v != v else str(v)
@@ -742,36 +762,36 @@ class DataFetcher:
         return self._purchase_cache
 
     def fund_profile(self, fund_code):
-        df = self.ak.fund_individual_basic_info_xq(symbol=fund_code)
+        df = self._ak(self.ak.fund_individual_basic_info_xq, symbol=fund_code)
         return dict(zip(df["item"], df["value"]))
 
     def fund_fees(self, fund_code):
-        df = self.ak.fund_individual_detail_info_xq(symbol=fund_code)
+        df = self._ak(self.ak.fund_individual_detail_info_xq, symbol=fund_code)
         return df.to_dict("records")
 
     def fund_achievement(self, fund_code):
-        df = self.ak.fund_individual_achievement_xq(symbol=fund_code)
+        df = self._ak(self.ak.fund_individual_achievement_xq, symbol=fund_code)
         return df.to_dict("records")
 
     def market_pe(self):
-        df = self.ak.stock_market_pe_lg(symbol="上证")
+        df = self._ak(self.ak.stock_market_pe_lg, symbol="上证")
         return df
 
     def us_index(self):
-        df = self.ak.index_us_stock_sina(symbol=".INX").tail(2)
+        df = self._ak(self.ak.index_us_stock_sina, symbol=".INX").tail(2)
         df = df[["date", "close"]].reset_index(drop=True)
         df["pct"] = df["close"].pct_change() * 100
         return df
 
     def margin_sse(self):
         start = (datetime.now() - pd.Timedelta(days=10)).strftime("%Y%m%d")
-        df = self.ak.stock_margin_sse(start_date=start, end_date=datetime.now().strftime("%Y%m%d"))
+        df = self._ak(self.ak.stock_margin_sse, start_date=start, end_date=datetime.now().strftime("%Y%m%d"))
         return df.head(3)
 
     # ---- 宏观扩展指标（V2.2 扩容；全部失败不阻塞） ----
     def us_bond_10y(self):
         """美债10年收益率（英为中美国债收益率表）"""
-        df = self.ak.bond_zh_us_rate()
+        df = self._ak(self.ak.bond_zh_us_rate, )
         col = "美国国债收益率10年"
         if col not in df.columns:
             return None
@@ -782,7 +802,7 @@ class DataFetcher:
 
     def crude_oil(self):
         """上期能源原油主力（SC0）"""
-        df = self.ak.futures_main_sina(symbol="SC0")
+        df = self._ak(self.ak.futures_main_sina, symbol="SC0")
         if df is None or len(df) < 2:
             return None
         cur = float(df["收盘价"].iloc[-1])
@@ -791,7 +811,7 @@ class DataFetcher:
 
     def copper(self):
         """沪铜主力（CU0，国际铜价定价锚）"""
-        df = self.ak.futures_main_sina(symbol="CU0")
+        df = self._ak(self.ak.futures_main_sina, symbol="CU0")
         if df is None or len(df) < 2:
             return None
         cur = float(df["收盘价"].iloc[-1])
@@ -834,7 +854,7 @@ class DataFetcher:
         return self._macro_yoy('macro_china_ppi', lambda c: '同比' in str(c))
 
     def pmi(self):
-        df = self.ak.macro_china_pmi()
+        df = self._ak(self.ak.macro_china_pmi, )
         col = [c for c in df.columns if "制造业" in str(c)]
         if not col:
             return None
@@ -846,7 +866,7 @@ class DataFetcher:
         # 实测列 社会融资规模增量 单位就是亿元（如 202601=72185 亿），旧代码 shrz/1e8 导致显示 0 亿。
         # 合理性校验：值 <= 0 或 NaN → None（宏观板块显示 数据缺失 而非 0 亿）。
         try:
-            df = self.ak.macro_china_shrzgm()
+            df = self._ak(self.ak.macro_china_shrzgm, )
             col = [c for c in df.columns if '社会融资规模' in str(c) and '累计' not in str(c)]
             if not col or '月份' not in df.columns:
                 return None

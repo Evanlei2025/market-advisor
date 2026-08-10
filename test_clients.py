@@ -57,7 +57,8 @@ def run():
           and nx["holdings"][0]["type"] == "cash")
 
     jing = clients[3]["cfg"]
-    check("Echo_Wang 空壳", len(jing.get("products", [])) == 0
+    check("Echo_Wang 关注池5产品", [p.get("code") for p in jing.get("products", [])] ==
+          ["009051", "110020", "160119", "588080", "050025"]
           and len(jing.get("holdings", [])) == 1
           and jing["holdings"][0]["type"] == "cash")
     check("Echo_Wang 客户级push覆盖", jing.get("push", {}).get("serverchan_key", "").startswith("SCT392325"))
