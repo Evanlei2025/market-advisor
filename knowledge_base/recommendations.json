@@ -4,5 +4,19 @@
     "name": "中证红利",
     "type": "industry",
     "reason": "今日涨1.29%，PE分位89%偏高，但防御属性突出。"
+  },
+  {
+    "date": "2026-08-10",
+    "name": "中证500",
+    "type": "industry",
+    "reason": "中证500 PE 30.13，近10年分位81%偏高，但近5日累计上涨8.3%，动量较强。",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-10",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "上证红利 PE 8.50，分位90%偏高，但股息率有吸引力，防御属性强。",
+    "client": "Evan_Lei"
   }
 ]
