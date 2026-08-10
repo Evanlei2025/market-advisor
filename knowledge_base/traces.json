@@ -60,7 +60,7 @@
     "factors": {
       "F_vol": 1.35,
       "F_hold": 1.1352,
-      "F_sector": 0.9927
+      "F_sector": 0.9925
     },
     "signal_date": "2026-08-10",
     "execute_date": "",

@@ -326,18 +326,18 @@ body {
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .navbar, .toc { background: var(--bg); }
 }
-.nav-inner { max-width: 720px; margin: 0 auto; padding: 10px 20px;
+.nav-inner { width: min(100% - 40px, 1150px); margin: 0 auto; padding: 10px 0;
              display: flex; align-items: baseline; gap: 10px; }
 .nav-brand { font-size: 17px; font-weight: 700; letter-spacing: .2px; }
 .nav-sub { font-size: 13px; color: var(--text3); }
-.page { max-width: 720px; margin: 0 auto; padding: 20px 16px 48px; }
+.page { width: min(100% - 40px, 1150px); margin: 0 auto; padding: 20px 0 48px; }
 h1 {
   font-size: 34px; line-height: 1.15; font-weight: 700; letter-spacing: -0.3px;
   margin: 10px 4px 4px; padding: 0; border: none;
 }
 /* ---------- 目录条（sticky，胶囊横向滚动） ---------- */
 .toc {
-  position: sticky; top: 0; z-index: 9; margin: 0 -16px;
+  position: sticky; top: 0; z-index: 9;
   background: var(--nav-bg);
   -webkit-backdrop-filter: blur(20px) saturate(1.8); backdrop-filter: blur(20px) saturate(1.8);
   border-bottom: .5px solid var(--sep2);
@@ -345,7 +345,7 @@ h1 {
   -webkit-overflow-scrolling: touch;
 }
 .toc::-webkit-scrollbar { display: none; }
-.toc-inner { max-width: 720px; margin: 0 auto; padding: 8px 16px; display: flex; gap: 6px; }
+.toc-inner { width: min(100% - 40px, 1150px); margin: 0 auto; padding: 8px 0; display: flex; gap: 6px; }
 .toc-btn {
   flex: 0 0 auto; border: none; cursor: pointer;
   font-family: inherit; font-size: 13px; font-weight: 600; color: var(--text2);
@@ -384,6 +384,7 @@ h1 {
 .group h3 { font-size: 13px; font-weight: 600; color: var(--text3);
             margin: 0; padding: 12px 16px 0; letter-spacing: .2px; }
 .group > p { margin: 0; padding: 10px 16px; }
+.group > p:empty { display: none; }
 .group > p + p { border-top: .5px solid var(--sep2); }
 .group > p.prod, .group > p.prod + p { border-top: none; }
 ul { list-style: none; margin: 0; padding: 0; }
@@ -488,9 +489,9 @@ hr { border: none; margin: 0; }
 code { background: var(--card2); padding: 1px 6px; border-radius: 6px; font-size: 13px; }
 @media (max-width: 640px) {
   h1 { font-size: 30px; }
-  .page { padding: 14px 12px 40px; }
-  .nav-inner { padding: 10px 12px; }
-  .toc { margin: 0 -12px; }
+  .page { width: min(100% - 24px, 1150px); padding: 14px 0 40px; }
+  .nav-inner { width: min(100% - 24px, 1150px); padding: 10px 0; }
+  .toc-inner { width: min(100% - 24px, 1150px); padding: 8px 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   body, .group { animation: none; }
@@ -635,7 +636,6 @@ def render(markdown_text, title="每日投顾报告", charts=None):
             close_table()
         if not line.strip():
             close_list(); close_quote(); close_metrics()
-            body.append("<p></p>")
             continue
         if line.startswith("# "):
             close_group()
