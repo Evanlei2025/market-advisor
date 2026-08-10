@@ -41,6 +41,30 @@
       "since_date": "2026-08-09",
       "last_seen": "2026-08-10",
       "client": "NULL_Xue"
+    },
+    "009051": {
+      "manager": "林伟斌 宋钊贤",
+      "since_date": "2026-08-10",
+      "last_seen": "2026-08-10",
+      "client": "Echo_Wang"
+    },
+    "110020": {
+      "manager": "余海燕 庞亚平",
+      "since_date": "2026-08-10",
+      "last_seen": "2026-08-10",
+      "client": "Echo_Wang"
+    },
+    "160119": {
+      "manager": "罗文杰 龚涛",
+      "since_date": "2026-08-10",
+      "last_seen": "2026-08-10",
+      "client": "Echo_Wang"
+    },
+    "050025": {
+      "manager": "万琼",
+      "since_date": "2026-08-10",
+      "last_seen": "2026-08-10",
+      "client": "Echo_Wang"
     }
   }
 }

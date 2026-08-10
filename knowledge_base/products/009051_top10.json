@@ -1,0 +1,46 @@
+{
+  "quarter": "2026Q2",
+  "stocks": [
+    {
+      "stock_name": "中远海控",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "上峰材料",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "中谷物流",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "兖矿能源",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "潞安环能",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "广汇能源",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "山煤国际",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "淮北矿业",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "昊华能源",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "西部矿业",
+      "weight": 0.0
+    }
+  ],
+  "_comment": "基金季报前十大重仓股缓存：quarter 形如 2026Q2；stocks 为 [{stock_name, weight}]，weight 为占净值比例(%)，缺失为 null"
+}

@@ -1,0 +1,46 @@
+{
+  "quarter": "2026Q2",
+  "stocks": [
+    {
+      "stock_name": "中际旭创",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "宁德时代",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "新易盛",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "寒武纪",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "贵州茅台",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "沐曦股份",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "兆易创新",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "西安奕材",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "北方华创",
+      "weight": 0.0
+    },
+    {
+      "stock_name": "美的集团",
+      "weight": 0.0
+    }
+  ],
+  "_comment": "基金季报前十大重仓股缓存：quarter 形如 2026Q2；stocks 为 [{stock_name, weight}]，weight 为占净值比例(%)，缺失为 null"
+}
