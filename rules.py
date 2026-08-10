@@ -1472,7 +1472,7 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
             summary_lines.append(f"- {names.get(code, code)}：已清仓")
     if tp_actions and shadow:
         for code, a in tp_actions.items():
-            summary_lines.append(f"- 止盈信号（影子模式，仅记录不执行）：{names.get(code, code)} {a['amount']:,.0f} 元（{a['reason']}）")
+            summary_lines.append(f"- 止盈信号（观察 · 仅记录不执行）：{names.get(code, code)} {a['amount']:,.0f} 元（{a['reason']}）")
     if storm_active:
         summary_lines.append(
             f"- 市场预警：估值与动量同时达警戒（{'/'.join(storm_reasons or ['STORM-5'])}）→ 买入冻结，持有现金。"

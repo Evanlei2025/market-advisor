@@ -407,7 +407,7 @@ def test_build_order_book(check):
     check('G5 影子模式记录信号', 'E' in tp_act and tp_act['E']['side'] == '信号'
           and tp_act['E']['rule_id'] == 'TP-YIELD-1' and approx(tp_act['E']['amount'], 20000.0),
           str(tp_act))
-    check('G5 影子摘要行', any('止盈信号' in x and '影子模式' in x for x in summary), str(summary))
+    check('G5 影子摘要行', any('止盈信号' in x and '观察' in x for x in summary), str(summary))
     # G5.3 repeat 去重 -> 无动作
     ctx = bok_ctx(mvs={'E': 60000}, shares={'E': 60000},
                   lots={'E': [{'buy_date': '2025-01-01', 'shares': 60000}]},

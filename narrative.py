@@ -116,7 +116,7 @@ class CRO:
         if s == "SIGNAL":
             names = "、".join(v.get("name", k) for k, v in self.i.tp_signals.items())
             return (f"观察期内止盈信号：{names} 已达到动态目标收益线。"
-                    f"当前为影子模式（观察期 6 个月），信号仅记录、不生成执行指令，"
+                    f"当前处于观察期（6 个月），信号仅记录、不生成执行指令，"
                     f"期满评估后转正式。")
         if s == "REGULAR":
             bond_buys = [o for o in self.i.orders
@@ -153,7 +153,7 @@ class CRO:
         if names:
             parts.append("昨日关注了" + "、".join(names) + "，今天检查它们是否值得继续关注")
         if codes:
-            parts.append("昨日对" + "、".join(codes) + "有止盈观察信号（影子模式），今天信号延续与否以报告为准")
+            parts.append("昨日对" + "、".join(codes) + "有止盈观察信号（仅记录不执行），今天信号延续与否以报告为准")
         if not parts:
             return None
         return "；".join(parts)
@@ -231,10 +231,10 @@ class CRO:
                 out.append(">")
                 amt = v.get("amount")
                 if amt:
-                    out.append(f"> **止盈信号**：{v.get('name', code)} 建议落袋约 {amt:,.0f} 元（影子模式，仅记录）")
+                    out.append(f"> **止盈信号**：{v.get('name', code)} 建议落袋约 {amt:,.0f} 元（观察，仅记录）")
                 else:
                     n = v.get("streak_days")
-                    out.append(f"> **止盈信号**：{v.get('name', code)} 持续观察中（第 {n} 天，影子模式，仅记录）")
+                    out.append(f"> **止盈信号**：{v.get('name', code)} 持续观察中（第 {n} 天 · 仅记录不执行）")
             out.append(">")
             out.append("> 人话：" + RULE_PRINCIPLES.get("TP-YIELD-1", ""))
         elif s == "REGULAR":

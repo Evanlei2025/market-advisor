@@ -167,8 +167,8 @@
     "date": "2026-08-10",
     "orders": [],
     "target_alloc": {
-      "equity": 0.3,
-      "bond": 0.6,
+      "equity": 0.4,
+      "bond": 0.5,
       "cash": 0.1
     },
     "pending_cash": [],
@@ -180,7 +180,7 @@
       }
     ],
     "storm_active": false,
-    "eq_target": 0.3,
+    "eq_target": 0.4,
     "client": "Evan_Lei"
   },
   {

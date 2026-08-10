@@ -984,15 +984,15 @@ def _macro_direction(nm, val, verbose=False):
 
 
 def _product_status_tag(p, pctx, tp_map, client_id):
-    """B6c 产品状态标签：✅持有（含止盈影子）/ 👀观察中 / ⚠️止盈信号持续中。"""
+    """B6c 产品状态标签：✅持有（含止盈观察）/ 👀观察中 / ⚠️止盈信号观察中。"""
     try:
         code = p.get("code", "")
         tp = tp_map.get(code) if isinstance(tp_map, dict) else None
         if tp:
             n = state_store.tp_streak_days(code, client=client_id)
             if tp.get("repeat"):
-                return f"⚠️ **止盈信号持续中（第 {n} 天，影子模式）**"
-            return f"✅ **持有**（止盈信号影子模式·第 {n} 天）"
+                return f"⚠️ **止盈信号观察中（第 {n} 天，仅记录不执行）**"
+            return f"✅ **持有**（止盈信号观察 · 第 {n} 天）"
         if p.get("status") == "observe":
             return "👀 **观察中**"
         return "✅ **持有**"
@@ -2089,18 +2089,18 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
         # 影子止盈信号（仅记录）
         if tp_actions:
             L("")
-            L("**止盈信号（影子模式·仅记录不执行）**")
+            L("**止盈信号（观察 · 仅记录不执行）**")
             for code, a in tp_actions.items():
                 L(f"- {code}：建议落袋约 {a['amount']:,.0f} 元")
                 L(f"  原因：{a['reason']}")
             L("*止盈目标线算法处于 6 个月观察期，信号仅供跟踪与评估，暂不生成执行指令。*")
         sstats = state_store.shadow_stats(cfg, client=client_id)
         if sstats.get("start"):
-            L(f"- 影子模式已运行 {sstats['days']} 天（起始 {sstats['start']}，6个月观察期），累计记录 {sstats['signals']} 次信号，涉及 {sstats['products']} 个产品")
+            L(f"- 观察已进行 {sstats['days']} 天（起始 {sstats['start']}，共 6 个月），累计记录 {sstats['signals']} 次信号，涉及 {sstats['products']} 个产品")
         if repeat_signals:
             for code, v in repeat_signals.items():
                 n = state_store.tp_streak_days(code, client=client_id)
-                L(f"- {v['name']}：止盈信号持续中（第 {n} 天，影子模式），与近 5 个交易日信号一致，今日不重复展示信号明细")
+                L(f"- {v['name']}：止盈信号持续观察中（第 {n} 天 · 仅记录不执行），与近 5 个交易日信号一致，今日不重复展示信号明细")
 
         if orders:
             holdings_buy = {h.get("fund_code") or h.get("code"): h.get("buy_date", "")
@@ -2159,7 +2159,7 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
             ob.append(f"{o['side']} {o['code']} {o['name']} {o['amount']:,.0f}元（{o['reason']}）")
         if tp_actions:
             for code, a in tp_actions.items():
-                ob.append(f"止盈信号 {code} {a['amount']:,.0f}元（影子）")
+                ob.append(f"止盈信号 {code} {a['amount']:,.0f}元（观察）")
         ctx["order_book"] = "\n".join(ob) if ob else "无操作，维持当前持仓"
         ctx["target_alloc"] = f"权益 {target_alloc.get('equity',0)*100:.0f}% / 固收 {target_alloc.get('bond',0)*100:.0f}% / 现金 {target_alloc.get('cash',0)*100:.0f}%"
         bond_state = "今日按纪律买入债券（组合风险管理驱动，非看多债市）" if any(
@@ -2315,7 +2315,7 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
     ctx["kb_summary"] = "\n".join(kb_parts) if kb_parts else "暂无档案"
     ctx["yesterday_recap"] = recap_line or None
     if tp_actions:
-        ctx["tp_signal_text"] = "；".join(f"{k} 建议落袋 {v['amount']:,.0f} 元（影子模式）" for k, v in tp_actions.items())
+        ctx["tp_signal_text"] = "；".join(f"{k} 建议落袋 {v['amount']:,.0f} 元（观察）" for k, v in tp_actions.items())
     else:
         ctx["tp_signal_text"] = "今日无止盈信号"
 

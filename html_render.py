@@ -42,10 +42,19 @@ _SIGNAL = re.compile(r"规则信号\s*[：:]\s*(✅|👀|⚠️)\s*\*\*(.+?)\*\*
 # 产品标题行（裸段落，以 ** 开头，非术语速查列表行）
 _PROD_ROW = re.compile(r"^\*\*(.+?)\*\*(.*)$")
 # 注释弱化行
-_NOTE_LI = re.compile(r"^(注[：:]|执行窗口|调仓后目标仓位)")
+_NOTE_LI = re.compile(r"^(注[：:]|执行窗口)")
 _NOTE_P = re.compile(r"^\*(.+)$")
 
 _TERM_ROW = re.compile(r"^\*\*(.+?)\*\*[：:]\s*")
+
+# ---------- 活指标卡片化（变量=蓝卡；静态文案=默认色） ----------
+# 主卡：「：」锚或白名单行词，后接数值/短文字+数字 → 数值区 .val 卡
+_VAL_LEAD = re.compile(r"^[+-]?[\d¥]")
+_VAL_LINE = re.compile(r"^(净值|近1年最大回撤|同类排名|费用|权益暴露|组合市值|上次反馈)\s*")
+_VAL_CUT_CHARS = "，；→⚠️"
+# 细粒度卡（决策依据行）：PE分位 N%、权益目标/上限 = N%
+_VAL_FINE_PE = re.compile(r"PE分位\s*([\d.]+%[^，；→]*)")
+_VAL_FINE_EQ = re.compile(r"(?:权益目标|权益上限)\s*[=＝]?\s*[^%，；→]{0,12}?(\d+%?)")
 
 # 默认展开的章节（其余折叠；目录可随时点开）
 _OPEN_GROUPS = {"今日一句话", "理财产品跟踪", "今日跟投指令"}
@@ -76,9 +85,11 @@ def _li_meta(raw):
 
 
 def _pct_html(seg):
-    """分位温度条 HTML（含分位段的段尾插入）"""
+    """分位温度条 HTML（含分位段的段尾插入）；「PE分位」由细卡覆盖，跳过温度条"""
     m = _FENWEI.search(seg)
     if not m:
+        return ""
+    if m.start() > 0 and seg[m.start() - 1] == "E":
         return ""
     n = float(m.group(1))
     if n > 100:
@@ -89,8 +100,82 @@ def _pct_html(seg):
             "<span class='pct-num'>%.0f%%</span>" % (n, hue, n))
 
 
-def _render_li_body(line):
-    """列表行内容：徽章 + 涨跌着色 + 「｜」拆段成行 + 分位条（段尾）+ 区间收益 chips"""
+def _cut_val(s):
+    """活值区截断：深度 0 处遇截断符停止；括号内（千位逗号/日期等）跳过"""
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch in "（(":
+            depth += 1
+        elif ch in "）)":
+            depth = max(0, depth - 1)
+        elif depth == 0 and ch in _VAL_CUT_CHARS:
+            return s[:i], s[i:]
+    return s, ""
+
+
+def _val_head(rest, max_pref):
+    """数值区起点判定：数字/符号开头，或 ≤max_pref 字文字前缀后紧跟数字"""
+    s = rest.strip()
+    if not s:
+        return None
+    if _VAL_LEAD.match(s):
+        return s
+    if re.match(r"^[^\d%s]{1,%d}?[+-]?\d" % (re.escape(_VAL_CUT_CHARS), max_pref), s):
+        return s
+    return None
+
+
+def _val_split(seg, max_pref):
+    """主卡拆分：返回 (标签, 数值区, 剩余) 或 None；「分位 N%」位置让给温度条"""
+    idx = -1
+    for c in "：:":
+        i = seg.find(c)
+        if i >= 0 and (idx < 0 or i < idx):
+            idx = i
+    if 0 < idx <= 14:
+        label, rest = seg[:idx], seg[idx + 1:]
+    else:
+        m = _VAL_LINE.match(seg)
+        if not m:
+            return None
+        label, rest = m.group(1), seg[m.end():]
+    head = _val_head(rest, max_pref)
+    if head is None:
+        return None
+    val, tail = _cut_val(head)
+    if not val or _FENWEI.search(val):
+        return None
+    return label, val, tail
+
+
+def _ud(text):
+    return _UPDOWN.sub(lambda mm: "<span class='ud %s'>%s</span>" % (
+        "up" if mm.group(1) == "🔴" else "dn", mm.group(2)), text)
+
+
+def _seg_html(seg, cards):
+    """段 → HTML：主卡（标签+蓝卡同行）+ 细卡 + 涨跌着色 + 温度条"""
+    if cards:
+        m = _val_split(seg, 8)
+        if m:
+            label, val, tail = m
+            h = _ud(_inline(label))
+            vh = _ud(_inline(val))
+            th = _ud(_inline(tail)) if tail else ""
+            out = h + "<span class='val'>" + vh + "</span>" + th
+        else:
+            out = _ud(_inline(seg))
+    else:
+        out = _ud(_inline(seg))
+    out = _VAL_FINE_PE.sub(lambda mm: "PE分位<span class='val'>" + _inline(mm.group(1)) + "</span>", out)
+    out = _VAL_FINE_EQ.sub(
+        lambda mm: mm.group(0)[:len(mm.group(0)) - len(mm.group(1))] + "<span class='val'>" + _inline(mm.group(1)) + "</span>",
+        out)
+    return out
+
+
+def _render_li_body(line, cards=True):
+    """列表行内容：徽章 + 涨跌着色 + 「｜」拆段成行 + 活值卡 + 分位条 + 区间收益 chips"""
     raw = line[2:].strip()
     prefix_html, raw = _li_meta(raw)
     m = _RET_ROW.search(raw)
@@ -113,8 +198,7 @@ def _render_li_body(line):
     for seg in (s.strip() for s in raw.split("｜")):
         if not seg:
             continue
-        h = _UPDOWN.sub(lambda mm: "<span class='ud %s'>%s</span>" % (
-            "up" if mm.group(1) == "🔴" else "dn", mm.group(2)), _inline(seg))
+        h = _seg_html(seg, cards)
         h += _pct_html(seg)
         lines.append(f"<span class='li-line'>{h}</span>")
     return prefix_html + "".join(lines)
@@ -321,6 +405,19 @@ li .ud { font-weight: 600; font-variant-numeric: tabular-nums; }
 li .ud.up { color: var(--red); }
 li .ud.dn { color: var(--green); }
 strong { font-weight: 600; }
+/* 活指标短卡（变量=蓝；静态文案=默认色；卡内涨跌红绿优先） */
+.val {
+  display: inline-block; vertical-align: baseline;
+  background: rgba(0, 122, 255, .09); color: var(--blue);
+  border-radius: 8px; padding: 1px 8px; font-weight: 600;
+  font-variant-numeric: tabular-nums; white-space: normal;
+}
+.val .ud.up { color: var(--red); }
+.val .ud.dn { color: var(--green); }
+.val em { font-style: normal; }
+@media (prefers-color-scheme: dark) {
+  .val { background: rgba(10, 132, 255, .20); color: #0A84FF; }
+}
 .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
          font-size: 13px; font-weight: 600; margin-left: 4px; }
 .b-ok { background: rgba(52,199,89,.14); color: var(--green); }
@@ -572,8 +669,8 @@ def render(markdown_text, title="每日投顾报告", charts=None):
             if not in_list:
                 body.append("<ul>")
                 in_list = True
-            content = _render_li_body(line)
             inner = line[2:].strip()
+            content = _render_li_body(line, cards=not (re.match(r"^⚠️", inner) or _NOTE_LI.match(inner)))
             if re.match(r"^⚠️", inner):
                 content = "<span class='warn-line'>" + content + "</span>"
             elif _NOTE_LI.match(inner):

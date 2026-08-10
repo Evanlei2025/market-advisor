@@ -54,13 +54,13 @@
   },
   {
     "T_eff": 0.2054,
-    "T_pre": 0.274,
+    "T_pre": 0.2738,
     "T_cap": 0.2054,
     "v_bench": 0.8142968142968143,
     "factors": {
       "F_vol": 1.35,
       "F_hold": 1.1352,
-      "F_sector": 0.9933
+      "F_sector": 0.9927
     },
     "signal_date": "2026-08-10",
     "execute_date": "",
