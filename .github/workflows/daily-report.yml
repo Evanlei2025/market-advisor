@@ -5,6 +5,13 @@ on:
     # 北京时间 15:35 = UTC 07:35，周一至周五
     - cron: '35 7 * * 1-5'
   workflow_dispatch:
+  push:
+    branches: [master]
+    # 源码/依赖/工作流变更时立即重建并部署（kb 数据 commit 不触发，防循环）
+    paths:
+      - '**.py'
+      - 'requirements.txt'
+      - '.github/workflows/daily-report.yml'
 
 permissions:
   contents: write
