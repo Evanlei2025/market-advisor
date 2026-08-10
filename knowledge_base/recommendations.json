@@ -32,5 +32,12 @@
     "type": "industry",
     "reason": "PE分位90%偏高，但股息率优势或提供防御。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-10",
+    "name": "中证500",
+    "type": "industry",
+    "reason": "PE分位82%偏高，但近5日累计上涨8.3%，动量强。",
+    "client": "Evan_Lei"
   }
 ]
