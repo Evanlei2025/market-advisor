@@ -105,6 +105,16 @@
 - **A2 数据源审计**：docs/DATA_SOURCE_AUDIT.md（akshare 1.18.81 实测 5 维度）：持有人结构 ✅F10 cyrjg（半年报，675123 机构占比 98.72% 实测）；换手率 ✅fund_portfolio_change_em；债基杠杆 ✅F10 zcfzb（1.008x 实测）/久期信用 ✗降级 config；A/C 份额 ✅fund_name_em+雪球费率表；规模历史 ✅F10 gmbd 季度序列（天然 point-in-time 防重述）。4.5 项纳入迭代六接入候选，统一天天基金 F10 三通道解析器（cyrjg/gmbd/zcfzb）
 - 验证：四测试全绿（15/15+28/28+76/76+23/23）；强制端到端（patch 交易日）经理快照写入验证
 
+### 迭代六·I：内联目录 + 可视化全面升级（2026-08-11，按规划文件执行）
+- **内联折叠目录**：删除悬浮目录按钮（toc-panel/toc-toggle/toc-nav 移除）→ 页面顶部 `<nav class="toc-inline">` 4 大分类卡片（details 默认收起、count 徽章、移动端 2 列）；锚点点击展开章节+平滑滚动；插入位置 page 内 charts 前
+- **图表艺术级美化**：估值柱磨砂渐变（hsl 按分位色相、borderRadius 10、borderSkipped）+ 50%/80% 虚线参考线（HLine 插件）；仓位饼图细环 72% + 段间距 + 中心数字环插件（总市值）；净值呼吸渐变面积 + 交互 index 模式 + 基准虚线 [6,5]；图表容器 grid + 白卡阴影
+- **新图表 3 个**：产品区间收益横向条形（近1周/1月/3月 蓝/橙/紫）、宏观因子雷达（PMI/CPI/PPI/利率/股债性价比 0-100 归一，macro_raw 写入 ctx）、股债性价比半环仪表盘（hsl 色相按分位）
+- **用图替代文字**：分位温度条 → conic-gradient 进度环（26px，@supports 降级灰环）；权益暴露进度环（20px）；区间收益 5 周期 SVG sparkline（齐全才生成）
+- **NAV 降采样**：1700+ 点 → ≤80 点（保留首尾+等距抽样，clamp 防越界；页面体积大幅下降）
+- **字体 5 级阶梯**：h1 34 / group-h 17 / 正文 15 / 辅助 14 / 标注 12
+- **Bug 自查修复**：估值图 JS 字面 % 未转义（100%,64% → 100%%,64%%）；降采样索引浮点越界（min clamp）；centerText/HLine 插件位置修正（config 顶层 plugins）
+- 验证：6 图断言 + 结构闭合 + build_chart_data 单测（6 键、nav 79 点）+ 四测试 15/15+28/28+84/84+23/23 + e2e 全量（Evan 6 图/其余 4 图）
+
 ### 迭代六·H：报告网页多级目录与长内容折叠（2026-08-11，按规划文件 c3b9e651 执行）
 - **删除顶部 toc 胶囊条**：toc-btn/toc-inner/IntersectionObserver 高亮全部移除
 - **多级目录悬浮面板**：`_TOC_CATEGORIES` 四分组（核心指令/市场概况/持仓分析/参考附录），startswith+包含匹配，未归类章节兜底参考附录；`_build_toc_panel` 生成 details/summary 分组导航；移动端右下角 48px 圆形「目录」按钮（点击展开 224px 面板），桌面 ≥1400px 右侧常驻 230px 侧栏（按钮隐藏）；点击链接展开章节+平滑滚动+移动端自动收面板

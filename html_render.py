@@ -86,8 +86,8 @@ def _scan_counts(markdown_text):
     return prods, terms
 
 
-def _build_toc_panel(groups):
-    """多级目录面板 HTML（悬浮按钮 + 按逻辑分组链接）；无章节（入口页）返回空"""
+def _build_inline_toc(groups):
+    """内联折叠目录（页面顶部 4 大分类卡片，默认收起）；无章节（入口页）返回空"""
     if not groups:
         return ""
     cats, used = [], set()
@@ -101,15 +101,15 @@ def _build_toc_panel(groups):
     if rest:
         cats.append((_TOC_FALLBACK, rest))
     idx = {g: i + 1 for i, g in enumerate(groups)}
-    parts = ['<aside class="toc-panel">',
-             '<button type="button" class="toc-toggle" aria-label="目录">目录</button>',
-             '<nav class="toc-nav">']
+    parts = ['<nav class="toc-inline">']
     for cat, items in cats:
-        parts.append(f'<details class="toc-cat" open><summary>{html_lib.escape(cat)}</summary>')
+        parts.append(f'<details class="toc-top"><summary>{html_lib.escape(cat)}'
+                     f'<span class="toc-count">{len(items)}</span></summary>'
+                     f'<div class="toc-links">')
         for g in items:
             parts.append(f'<a href="#sec-{idx[g]}">{html_lib.escape(g)}</a>')
-        parts.append("</details>")
-    parts.append("</nav></aside>")
+        parts.append("</div></details>")
+    parts.append("</nav>")
     return "".join(parts)
 
 
@@ -138,7 +138,7 @@ def _li_meta(raw):
 
 
 def _pct_html(seg):
-    """分位温度条 HTML（含分位段的段尾插入）；「PE分位」由细卡覆盖，跳过温度条"""
+    """分位进度环（conic-gradient 圆环 + 数字）；「PE分位」由细卡覆盖，跳过"""
     m = _FENWEI.search(seg)
     if not m:
         return ""
@@ -148,9 +148,19 @@ def _pct_html(seg):
     if n > 100:
         return ""
     hue = _pct_hue(n)
-    return ("<span class='pct'><span class='pct-fill' "
-            "style='width:%.0f%%;background:hsl(%d,100%%,55%%)'></span></span>"
+    return ("<span class='pct-ring' style='--pct-val:%.0f;--pct-hue:%d'></span>"
             "<span class='pct-num'>%.0f%%</span>" % (n, hue, n))
+
+
+def _exposure_ring_html(seg):
+    """权益暴露进度环（识别「权益暴露 N%」）"""
+    m = re.search(r"权益暴露\s*([\d.]+)\s*%", seg)
+    if not m:
+        return ""
+    n = float(m.group(1))
+    if n > 100:
+        return ""
+    return "<span class='exp-ring' style='--exp-val:%.0f'></span>" % n
 
 
 def _cut_val(s):
@@ -207,7 +217,7 @@ def _ud(text):
 
 
 def _seg_html(seg, cards):
-    """段 → HTML：主卡（标签+蓝卡同行）+ 细卡 + 涨跌着色 + 温度条"""
+    """段 → HTML：主卡（标签+蓝卡同行）+ 细卡 + 涨跌着色 + 权益暴露环"""
     if cards:
         m = _val_split(seg, 8)
         if m:
@@ -224,17 +234,19 @@ def _seg_html(seg, cards):
     out = _VAL_FINE_EQ.sub(
         lambda mm: mm.group(0)[:len(mm.group(0)) - len(mm.group(1))] + "<span class='val'>" + _inline(mm.group(1)) + "</span>",
         out)
+    out += _exposure_ring_html(seg)
     return out
 
 
 def _render_li_body(line, cards=True):
-    """列表行内容：徽章 + 涨跌着色 + 「｜」拆段成行 + 活值卡 + 分位条 + 区间收益 chips"""
+    """列表行内容：徽章 + 涨跌着色 + 「｜」拆段成行 + 活值卡 + 分位环 + 区间收益 chips"""
     raw = line[2:].strip()
     prefix_html, raw = _li_meta(raw)
     m = _RET_ROW.search(raw)
     if m:
         out = _inline(raw)
         chips = []
+        vals = []
         for label, num in _RET_ITEM.findall(m.group(1)):
             v = float(num)
             w = max(6, min(60, abs(v) * 4))
@@ -243,9 +255,11 @@ def _render_li_body(line, cards=True):
             chips.append(
                 "<span class='chip'><i class='%s' style='width:%dpx'></i>"
                 "<b>%s %s%%</b></span>" % (cls, w, label, shown))
+            vals.append(v)
+        spark = _sparkline_html(vals)
         if chips:
             out = _RET_ROW.sub("", out, count=1)
-            out += "<span class='ret-chips'>" + "".join(chips) + "</span>"
+            out += "<span class='ret-chips'>" + "".join(chips) + "</span>" + spark
         return prefix_html + out
     lines = []
     for seg in (s.strip() for s in raw.split("｜")):
@@ -257,6 +271,23 @@ def _render_li_body(line, cards=True):
     return prefix_html + "".join(lines)
 
 
+def _sparkline_html(vals):
+    """区间收益迷你折线（5 周期齐全才生成；归一化到 60×20 视口）"""
+    if len(vals) != 5:
+        return ""
+    vmax = max(abs(v) for v in vals)
+    if vmax <= 0:
+        vmax = 1.0
+    pts = []
+    for i, v in enumerate(vals):
+        x = round(i * 14, 1)
+        y = round(10 - (v / vmax) * 8, 1)
+        pts.append("%d,%s" % (x, y))
+    return ("<svg class='sparkline' viewBox='0 0 60 20' preserveAspectRatio='none' "
+            "aria-hidden='true'><polyline points='%s' fill='none' stroke='var(--blue)' "
+            "stroke-width='1.5'/></svg>" % " ".join(pts))
+
+
 def _render_p(line):
     """裸段落行：说明行 → .note；其余普通段落（产品标题行由 render 主循环拦截处理）"""
     raw = line.strip()
@@ -266,56 +297,136 @@ def _render_p(line):
 
 
 def _charts_html(charts):
-    """Chart.js 图表容器（CDN 加载失败时页面正文不受影响）"""
+    """Chart.js 图表容器（艺术级：渐变柱/中心数字环/呼吸面积/雷达/仪表盘；CDN 失败不影响正文）"""
     if not charts:
         return ""
     boxes, init = [], []
     if charts.get("valuation"):
         vals = charts["valuation"]["values"]
-        colors = ",".join("'hsl(%d,100%%,55%%)'" % _pct_hue(v) for v in vals)
+        hues = ",".join(str(_pct_hue(v)) for v in vals)
         boxes.append('<div class="chart-box"><h3>估值温度（PE 十年分位 %）</h3>'
                      '<canvas id="chVal"></canvas></div>')
         init.append(
+            "var HUES=[%s];var HLine={id:'hline',afterDraw:function(c){"
+            "var yc=c.chart.area;[{v:50,col:cGrid},{v:80,col:cOrange}].forEach(function(l){"
+            "var y=yc.top+(c.scales.y.getPixelForValue(l.v)-yc.top);"
+            "if(c.scales.y.min<l.v&&l.v<c.scales.y.max){var g=c.ctx;g.save();"
+            "g.strokeStyle=l.col;g.setLineDash([4,4]);g.lineWidth=1;"
+            "g.beginPath();g.moveTo(yc.left,y);g.lineTo(yc.right,y);g.stroke();g.restore();}});}};"
             "new Chart(document.getElementById('chVal'),{type:'bar',"
-            "data:{labels:%s,datasets:[{data:%s,backgroundColor:[%s],"
-            "borderRadius:6,maxBarThickness:34}]},"
+            "data:{labels:%s,datasets:[{data:%s,"
+            "backgroundColor:function(c){var i=c.dataIndex,ctx=c.chart.ctx,"
+            "g=ctx.createLinearGradient(0,0,0,c.chart.height);"
+            "g.addColorStop(0,'hsl('+HUES[i]+',100%%,64%%)');"
+            "g.addColorStop(1,'hsl('+HUES[i]+',78%%,42%%)');return g;},"
+            "borderRadius:10,borderSkipped:false,maxBarThickness:38}]},"
             "options:{plugins:{legend:{display:false}},"
-            "scales:{y:{beginAtZero:true,max:100,grid:{color:cGrid},"
-            "ticks:{color:cFg,font:{size:11}}},"
-            "x:{grid:{display:false},ticks:{color:cFg,font:{size:12}}}}},"
-            "animation:{duration:400}})" % (
+            "scales:{y:{beginAtZero:true,max:100,grid:{color:cGrid,drawTicks:false},"
+            "border:{display:false},ticks:{color:cFg,font:{size:12,weight:'600'},padding:8}},"
+            "x:{grid:{display:false},border:{display:false},ticks:{color:cFg,font:{size:12}}}}},"
+            "plugins:[HLine],animation:{duration:400}})" % (
+                hues,
                 json.dumps(charts["valuation"]["labels"], ensure_ascii=False),
-                json.dumps(vals), colors))
+                json.dumps(vals)))
     if charts.get("allocation"):
         boxes.append('<div class="chart-box"><h3>组合仓位构成（市值口径）</h3>'
                      '<canvas id="chAlloc"></canvas></div>')
         init.append(
             "new Chart(document.getElementById('chAlloc'),{type:'doughnut',"
             "data:{labels:%s,datasets:[{data:%s,backgroundColor:[cBlue,cGreen,cOrange,cPurple,cRed],"
-            "borderColor:cCard,borderWidth:3}]},"
-            "options:{cutout:'62%%',plugins:{legend:{position:'bottom',"
-            "labels:{color:cFg,font:{size:12},padding:12,usePointStyle:true,pointStyleWidth:8}}},"
-            "animation:{duration:400}}})" % (
+            "borderWidth:0,spacing:4,hoverOffset:12}]},"
+            "options:{cutout:'72%%',plugins:{legend:{position:'bottom',"
+            "labels:{color:cFg,font:{size:12},padding:14,usePointStyle:true,pointStyleWidth:8}},"
+            "tooltip:{callbacks:{label:function(c){return c.label+' ¥'+c.parsed.toLocaleString();}}}},"
+            "animation:{duration:500}},"
+            "plugins:[{id:'centerText',afterDraw:function(c){"
+            "var ctx=c.ctx,cc=c.chartArea,w=cc.right-cc.left,h=cc.bottom-cc.top;"
+            "var cx=cc.left+w/2,cy=cc.top+h/2;"
+            "var tot=c.data.datasets[0].data.reduce(function(a,b){return a+b;},0);"
+            "ctx.textAlign='center';ctx.textBaseline='middle';"
+            "ctx.fillStyle=cFg;ctx.font='700 24px -apple-system,PingFang SC,sans-serif';"
+            "ctx.fillText('¥'+tot.toLocaleString(),cx,cy-8);"
+            "ctx.font='12px -apple-system,PingFang SC,sans-serif';"
+            "ctx.fillText('总市值',cx,cy+16);}}])" % (
                 json.dumps(charts["allocation"]["labels"], ensure_ascii=False),
                 json.dumps(charts["allocation"]["values"])))
     if charts.get("nav"):
         nv = charts["nav"]
-        ds = ("{label:'组合',data:%s,borderColor:cBlue,backgroundColor:cBlueFill,"
-              "fill:true,borderWidth:2,pointRadius:0,tension:0.35}" % json.dumps(nv["values"]))
+        ds = ("{label:'组合',data:%s,borderColor:cBlue,"
+              "backgroundColor:function(c){var g=c.chart.ctx.createLinearGradient(0,0,0,c.chart.height);"
+              "g.addColorStop(0,cBlue+'3D');g.addColorStop(1,cBlue+'00');return g;},"
+              "fill:true,borderWidth:2.5,pointRadius:0,tension:0.4}" % json.dumps(nv["values"]))
         if nv.get("bench"):
-            ds += (",{label:'基准',data:%s,borderColor:cOrange,fill:false,borderWidth:2,"
-                   "borderDash:[5,4],pointRadius:0,tension:0.35}" % json.dumps(nv["bench"]))
+            ds += (",{label:'基准',data:%s,borderColor:cOrange,fill:false,borderWidth:1.5,"
+                   "borderDash:[6,5],pointRadius:0,tension:0.4}" % json.dumps(nv["bench"]))
         boxes.append('<div class="chart-box"><h3>组合净值走势（近250日，起点=100）</h3>'
                      '<canvas id="chNav"></canvas></div>')
         init.append(
             "new Chart(document.getElementById('chNav'),{type:'line',"
             "data:{labels:%s,datasets:[%s]},"
-            "options:{plugins:{legend:{labels:{color:cFg,font:{size:12},usePointStyle:true,"
+            "options:{interaction:{mode:'index',intersect:false},"
+            "plugins:{legend:{labels:{color:cFg,font:{size:12},usePointStyle:true,"
             "pointStyleWidth:8,boxHeight:3}}},"
-            "scales:{x:{grid:{display:false},ticks:{color:cFg,font:{size:10},maxTicksLimit:6}},"
-            "y:{grid:{color:cGrid},ticks:{color:cFg,font:{size:11}}}},"
-            "animation:{duration:500}}})" % (
+            "scales:{x:{grid:{display:false},border:{display:false},"
+            "ticks:{color:cFg,font:{size:10},maxTicksLimit:6,maxRotation:0}},"
+            "y:{grid:{color:cGrid,drawTicks:false},border:{display:false},ticks:{color:cFg,font:{size:11}}}},"
+            "animation:{duration:300}}})" % (
                 json.dumps(nv["labels"]), ds))
+    if charts.get("product_returns"):
+        pr = charts["product_returns"]
+        boxes.append('<div class="chart-box"><h3>产品区间收益（%）</h3>'
+                     '<canvas id="chRet"></canvas></div>')
+        init.append(
+            "new Chart(document.getElementById('chRet'),{type:'bar',"
+            "data:{labels:%s,datasets:["
+            "{label:'近1周',data:%s,backgroundColor:cBlue,borderRadius:6,barPercentage:0.7},"
+            "{label:'近1月',data:%s,backgroundColor:cOrange,borderRadius:6,barPercentage:0.7},"
+            "{label:'近3月',data:%s,backgroundColor:cPurple,borderRadius:6,barPercentage:0.7}]},"
+            "options:{indexAxis:'y',plugins:{legend:{labels:{color:cFg,font:{size:12},"
+            "usePointStyle:true,pointStyleWidth:8,boxHeight:3}}},"
+            "scales:{x:{grid:{color:cGrid,drawTicks:false},border:{display:false},"
+            "ticks:{color:cFg,font:{size:11}}},"
+            "y:{grid:{display:false},border:{display:false},ticks:{color:cFg,font:{size:12}}}}},"
+            "animation:{duration:400}})" % (
+                json.dumps(pr["labels"], ensure_ascii=False),
+                json.dumps(pr["datasets"][0]["data"]),
+                json.dumps(pr["datasets"][1]["data"]),
+                json.dumps(pr["datasets"][2]["data"])))
+    if charts.get("macro_radar"):
+        mr = charts["macro_radar"]
+        boxes.append('<div class="chart-box"><h3>宏观因子雷达（0-100 归一）</h3>'
+                     '<canvas id="chRadar"></canvas></div>')
+        init.append(
+            "new Chart(document.getElementById('chRadar'),{type:'radar',"
+            "data:{labels:%s,datasets:[{data:%s,fill:true,"
+            "backgroundColor:cBlue+'26',borderColor:cBlue,borderWidth:2,"
+            "pointRadius:4,pointBackgroundColor:cBlue}]},"
+            "options:{plugins:{legend:{display:false}},"
+            "scales:{r:{min:0,max:100,ticks:{stepSize:25,color:cFg,font:{size:10},backdropColor:'transparent'},"
+            "grid:{color:cGrid+'66'},angleLines:{color:cGrid+'66'},pointLabels:{color:cFg,font:{size:12}}}}},"
+            "animation:{duration:400}})" % (
+                json.dumps(mr["labels"], ensure_ascii=False),
+                json.dumps(mr["values"])))
+    if charts.get("ep_gauge"):
+        eg = charts["ep_gauge"]
+        boxes.append('<div class="chart-box"><h3>股债性价比仪表盘</h3>'
+                     '<canvas id="chGauge"></canvas></div>')
+        init.append(
+            "new Chart(document.getElementById('chGauge'),{type:'doughnut',"
+            "data:{datasets:[{data:[%s,%s],"
+            "backgroundColor:[GaugeColor(%s),cGrid],borderWidth:0}]},"
+            "options:{rotation:-90,circumference:180,cutout:'78%%',"
+            "plugins:{legend:{display:false},tooltip:{enabled:false}}},"
+            "plugins:[{id:'gaugeText',afterDraw:function(c){"
+            "var ctx=c.ctx,cc=c.chartArea,cx=(cc.left+cc.right)/2,cy=(cc.top+cc.bottom)/2;"
+            "ctx.textAlign='center';ctx.textBaseline='middle';"
+            "ctx.fillStyle=cFg;ctx.font='700 22px -apple-system,PingFang SC,sans-serif';"
+            "ctx.fillText(%s+'%%',cx,cy-6);"
+            "ctx.font='12px -apple-system,PingFang SC,sans-serif';"
+            "ctx.fillText('%s',cx,cy+16);}}]})" % (
+                eg["value"], round(100 - eg["value"], 1),
+                _pct_hue(eg["value"]),
+                eg["value"], eg.get("label", "股债性价比分位")))
     if not boxes:
         return ""
     return ("<script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js\"></script>\n"
@@ -328,6 +439,7 @@ def _charts_html(charts):
             "var cOrange=cs.getPropertyValue('--orange').trim()||'#FF9500';\n"
             "var cPurple='#AF52DE';\nvar cRed=cs.getPropertyValue('--red').trim()||'#FF3B30';\n"
             "var cBlueFill=cBlue+'1F';\n"
+            "function GaugeColor(h){return 'hsl('+h+',100%,55%)';}\n"
             "</script>\n"
             "<div class=\"charts\">" + "\n".join(boxes) + "</div>\n"
             "<script>document.addEventListener('DOMContentLoaded',function(){"
@@ -360,7 +472,7 @@ html { -webkit-text-size-adjust: 100%; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
   background: var(--bg); color: var(--text);
-  margin: 0; line-height: 1.55; font-size: 17px;
+  margin: 0; line-height: 1.55; font-size: 15px;
   -webkit-font-smoothing: antialiased;
   animation: fadeIn .3s ease both;
 }
@@ -383,47 +495,43 @@ h1 {
   font-size: 34px; line-height: 1.15; font-weight: 700; letter-spacing: -0.3px;
   margin: 10px 4px 4px; padding: 0; border: none;
 }
-/* ---------- 多级目录面板（悬浮按钮 + 分组导航） ---------- */
-.toc-panel { position: fixed; bottom: 20px; right: 20px; z-index: 20; }
-.toc-toggle {
-  width: 48px; height: 48px; border-radius: 50%;
-  background: var(--blue); color: #fff; border: none;
-  font-size: 14px; font-weight: 600; cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0,122,255,.3);
+/* ---------- 内联折叠目录（页面顶部 4 分类卡片） ---------- */
+.toc-inline {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  padding: 16px 0 12px; border-bottom: .5px solid var(--sep2);
+}
+.toc-top {
+  background: var(--card); border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  overflow: hidden;
+}
+.toc-top > summary {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; font-size: 14px; font-weight: 700;
+  color: var(--text); cursor: pointer; list-style: none;
   -webkit-tap-highlight-color: transparent;
 }
-.toc-nav {
-  display: none; position: absolute; bottom: 56px; right: 0;
-  width: 224px; max-height: 70vh; overflow-y: auto;
-  background: var(--card); border-radius: 16px;
-  box-shadow: var(--shadow); padding: 10px 0;
+.toc-top > summary::-webkit-details-marker { display: none; }
+.toc-top > summary::after { content: "▸"; font-size: 12px; color: var(--text3); transition: transform .2s; }
+.toc-top[open] > summary::after { transform: rotate(90deg); }
+.toc-count {
+  font-size: 12px; font-weight: 600; color: var(--text3);
+  background: var(--card2); border-radius: 99px; padding: 2px 7px;
+  margin-left: 6px;
 }
-.toc-panel.open .toc-nav { display: block; }
-.toc-cat { padding: 0 12px; }
-.toc-cat summary {
-  font-size: 13px; font-weight: 700; color: var(--text2);
-  padding: 8px 4px 6px; cursor: pointer; list-style: none;
-}
-.toc-cat summary::-webkit-details-marker { display: none; }
-.toc-cat summary::before { content: "▸ "; font-size: 11px; color: var(--text3); }
-.toc-cat[open] summary::before { content: "▾ "; }
-.toc-cat a {
+.toc-links { padding: 0 14px 10px; }
+.toc-links a {
   display: block; font-size: 13px; color: var(--text3);
-  padding: 6px 4px 6px 18px; text-decoration: none;
-  border-radius: 8px;
+  padding: 6px 0; text-decoration: none; border-bottom: .5px solid var(--sep2);
 }
-.toc-cat a:hover { background: var(--card2); color: var(--text); }
-@media (min-width: 1400px) {
-  .toc-panel { position: fixed; top: 100px; right: 40px; bottom: auto; }
-  .toc-toggle { display: none; }
-  .toc-nav { display: block; position: static; bottom: auto; width: 230px; }
-}
+.toc-links a:last-child { border-bottom: none; }
+.toc-links a:hover { color: var(--blue); }
 @media (max-width: 640px) {
-  .toc-panel { bottom: 14px; right: 14px; }
+  .toc-inline { grid-template-columns: repeat(2, 1fr); }
 }
 /* ---------- 章节（折叠手风琴） ---------- */
 .group-h {
-  font-size: 15px; font-weight: 600; color: var(--text);
+  font-size: 17px; font-weight: 600; color: var(--text);
   margin: 22px 8px 8px; padding: 2px 4px; cursor: pointer;
   display: flex; align-items: center; gap: 6px;
   -webkit-tap-highlight-color: transparent;
@@ -489,13 +597,33 @@ li {
 li + li { border-top: .5px solid var(--sep2); }
 .li-line { display: block; line-height: 1.5; }
 .li-line + .li-line { margin-top: 4px; }
-li .pct { display: inline-block; vertical-align: middle; width: 88px; height: 6px;
-          border-radius: 999px; background: var(--sep); overflow: hidden; margin-left: 6px; }
-li .pct-fill { display: block; height: 100%; border-radius: 999px;
-               transition: width .5s ease; }
+/* 分位进度环（conic-gradient；不支持时降级灰色圆环+数字） */
+.pct-ring {
+  display: inline-block; vertical-align: middle; width: 26px; height: 26px;
+  border-radius: 50%; margin-left: 8px; margin-right: 4px;
+  background: conic-gradient(hsl(var(--pct-hue),100%,55%) calc(var(--pct-val) * 1%), var(--sep) 0);
+  -webkit-mask: radial-gradient(circle, transparent 62%, #000 64%);
+  mask: radial-gradient(circle, transparent 62%, #000 64%);
+}
+@supports not (background: conic-gradient(from 0deg, red, red)) {
+  .pct-ring { background: var(--sep); }
+}
 li .pct-num { display: inline-block; vertical-align: middle; min-width: 40px;
-              text-align: right; font-size: 13px; font-weight: 600; color: var(--text3);
-              font-variant-numeric: tabular-nums; margin-left: 4px; }
+              text-align: left; font-size: 12px; font-weight: 600; color: var(--text3);
+              font-variant-numeric: tabular-nums; }
+/* 权益暴露进度环 */
+.exp-ring {
+  display: inline-block; vertical-align: middle; width: 20px; height: 20px;
+  border-radius: 50%; margin-left: 6px;
+  background: conic-gradient(var(--blue) calc(var(--exp-val) * 1%), var(--sep) 0);
+  -webkit-mask: radial-gradient(circle, transparent 62%, #000 64%);
+  mask: radial-gradient(circle, transparent 62%, #000 64%);
+}
+@supports not (background: conic-gradient(from 0deg, red, red)) {
+  .exp-ring { display: none; }
+}
+/* 区间收益迷你折线 */
+.sparkline { width: 60px; height: 20px; vertical-align: middle; margin-left: 8px; }
 li .ud { font-weight: 600; font-variant-numeric: tabular-nums; }
 li .ud.up { color: var(--red); }
 li .ud.dn { color: var(--green); }
@@ -522,7 +650,7 @@ strong { font-weight: 600; }
              margin-top: 6px; padding: 8px 10px; border-radius: 12px;
              background: var(--card2); align-self: flex-start; }
 .chip { display: flex; flex-direction: column; align-items: center; gap: 3px; }
-.chip b { font-size: 11px; font-weight: 600; color: var(--text2);
+.chip b { font-size: 12px; font-weight: 600; color: var(--text2);
           font-variant-numeric: tabular-nums; }
 .chip i { height: 4px; border-radius: 999px; min-width: 6px; }
 .chip i.pos { background: var(--red); }
@@ -535,7 +663,7 @@ strong { font-weight: 600; }
 .metric { background: var(--card); padding: 14px 16px; }
 .metric .m-val { font-size: 26px; font-weight: 700; letter-spacing: -0.4px;
                  font-variant-numeric: tabular-nums; }
-.metric .m-label { font-size: 13px; color: var(--text3); margin-top: 2px; }
+.metric .m-label { font-size: 12px; color: var(--text3); margin-top: 2px; }
 .metric .m-sub { font-size: 11px; color: var(--text4); }
 .metric .m-note { font-size: 13px; color: var(--text2); margin-top: 8px; line-height: 1.45; }
 blockquote {
@@ -560,11 +688,13 @@ td:first-child { font-weight: 600; }
 pre { margin: 0; padding: 12px 16px; background: var(--card2); overflow-x: auto;
       font-size: 13px; }
 hr { border: none; margin: 0; }
-.charts { display: flex; flex-wrap: wrap; gap: 12px; padding: 0 16px; }
-.chart-box { flex: 1 1 320px; min-width: 280px; border-radius: 12px;
-             padding: 12px; background: var(--card2); }
-.chart-box canvas { width: 100% !important; height: 240px !important; }
-.chart-box h3 { padding: 4px 4px 8px; }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+          gap: 16px; padding: 16px 0 24px; }
+.chart-box { background: var(--card); border-radius: 16px;
+             padding: 20px; box-shadow: var(--shadow); }
+.chart-box canvas { width: 100% !important; height: 220px !important; }
+.chart-box h3 { font-size: 14px; font-weight: 600; color: var(--text3);
+                margin: 0 0 12px; letter-spacing: .3px; }
 /* 入口页（无分组）：ul 直接成卡片，链接行带 chevron */
 .page > ul { background: var(--card); border-radius: 16px; box-shadow: var(--shadow);
              overflow: hidden; margin: 16px 0; }
@@ -580,7 +710,6 @@ code { background: var(--card2); padding: 1px 6px; border-radius: 6px; font-size
 }
 @media (prefers-reduced-motion: reduce) {
   body, .group { animation: none; }
-  .pct-fill { transition: none; }
   .group-h .chev { transition: none; }
 }
 """
@@ -603,20 +732,14 @@ document.addEventListener('DOMContentLoaded',function(){
     });
   });
   var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  var tp = document.querySelector('.toc-panel');
-  if (tp) {
-    var tgl = tp.querySelector('.toc-toggle');
-    if (tgl) tgl.addEventListener('click', function(){ tp.classList.toggle('open'); });
-    tp.querySelectorAll('.toc-cat a').forEach(function(a){
-      a.addEventListener('click', function(){
-        var id = a.getAttribute('href').slice(1);
-        var h = document.getElementById(id);
-        if (h && !open[id]) { open[id] = 1; sync(h); }
-        if (h) h.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
-        tp.classList.remove('open');
-      });
+  document.querySelectorAll('.toc-links a').forEach(function(a){
+    a.addEventListener('click', function(){
+      var id = a.getAttribute('href').slice(1);
+      var h = document.getElementById(id);
+      if (h && !open[id]) { open[id] = 1; sync(h); }
+      if (h) h.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
     });
-  }
+  });
 });
 </script>
 """
@@ -818,7 +941,7 @@ def render(markdown_text, title="每日投顾报告", charts=None):
     else:
         brand = title
 
-    toc_panel = _build_toc_panel(groups)
+    toc_inline = _build_inline_toc(groups)
 
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -836,10 +959,10 @@ def render(markdown_text, title="每日投顾报告", charts=None):
 <span class="nav-brand">{html_lib.escape(brand)}</span><span class="nav-sub">{html_lib.escape(sub)}</span>
 </div></header>
 <div class="page">
+{toc_inline}
 {_charts_html(charts)}
 {''.join(body)}
 </div>
-{toc_panel}
 {_UI_JS}
 </body>
 </html>"""

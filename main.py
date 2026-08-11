@@ -1326,7 +1326,8 @@ _ARGS = None
 
 
 def build_chart_data(ctx, mv_map, returns_map, weights_map, bench_ret_series, total_mv, bench_weights=None):
-    """6.1 HTML 图表数据：估值条形图 / 仓位饼图 / 组合净值 vs 基准（数据不足返回空 dict）"""
+    """6.1 HTML 图表数据：估值条形图 / 仓位饼图 / 组合净值 vs 基准 / 区间收益 / 宏观雷达 / EP 仪表盘
+    （数据不足返回空 dict）"""
     out = {}
     pe = {}
     for key, label in (("csi300_pe_pctile", "沪深300"),
@@ -1358,19 +1359,70 @@ def build_chart_data(ctx, mv_map, returns_map, weights_map, bench_ret_series, to
             port = port[port.abs() < 0.5]
             if len(port) > 30:
                 cum = (1.0 + port).cumprod() * 100.0
-                nav = {"labels": [str(d)[:10] for d in cum.index],
-                       "values": [round(v, 1) for v in cum.values]}
+                bb = None
                 if bench_ret_series:
-                    bb = None
                     for bname, s in bench_ret_series.items():
                         w = bench_weights.get(bname) if bench_weights else None
                         if not w:
                             continue
                         part = pd.Series(s).reindex(port.index).ffill().fillna(0.0) * float(w)
                         bb = part if bb is None else bb + part
-                    if bb is not None:
-                        nav["bench"] = [round(v, 1) for v in ((1.0 + bb).cumprod() * 100.0).values]
+                bb_cum = ((1.0 + bb).cumprod() * 100.0) if bb is not None else None
+                # 降采样至 ≤80 点（保留首尾 + 等距抽样，页面体积与渲染性能）
+                MAX_NAV_POINTS = 80
+                if len(cum) > MAX_NAV_POINTS:
+                    step = len(cum) / (MAX_NAV_POINTS - 2)
+                    indices = [0] + [min(len(cum) - 1, int(i * step))
+                                     for i in range(1, MAX_NAV_POINTS - 1)] + [len(cum) - 1]
+                    indices = sorted(set(indices))
+                    cum = cum.iloc[indices]
+                    if bb_cum is not None:
+                        bb_cum = bb_cum.iloc[indices]
+                nav = {"labels": [str(d)[:10] for d in cum.index],
+                       "values": [round(v, 1) for v in cum.values]}
+                if bb_cum is not None:
+                    nav["bench"] = [round(v, 1) for v in bb_cum.values]
                 out["nav"] = nav
+    # 产品区间收益横向对比（近1周/近1月/近3月）
+    if returns_map:
+        ret_labels, ret_1w, ret_1m, ret_3m = [], [], [], []
+        for code, r in returns_map.items():
+            if len(r) < 66:
+                continue
+            s = pd.Series(r).dropna()
+            if len(s) < 66:
+                continue
+            ret_labels.append(str(code))
+            ret_1w.append(round(float((1 + s.iloc[-5:]).prod() - 1) * 100, 1))
+            ret_1m.append(round(float((1 + s.iloc[-22:]).prod() - 1) * 100, 1))
+            ret_3m.append(round(float((1 + s.iloc[-66:]).prod() - 1) * 100, 1))
+        if ret_labels:
+            out["product_returns"] = {"labels": ret_labels, "datasets": [
+                {"label": "近1周", "data": ret_1w},
+                {"label": "近1月", "data": ret_1m},
+                {"label": "近3月", "data": ret_3m}]}
+    # 宏观因子雷达（归一化 0-100）
+    mraw = ctx.get("macro_raw") or {}
+    macro = {}
+    pmi = mraw.get("PMI")
+    if pmi is not None:
+        macro["PMI景气"] = round(max(0, min(100, (float(pmi) - 45) * 10)), 1)
+    cpi = mraw.get("CPI")
+    if cpi is not None:
+        macro["CPI通胀"] = round(max(0, min(100, float(cpi) * 20 + 50)), 1)
+    ppi = mraw.get("PPI")
+    if ppi is not None:
+        macro["PPI工业"] = round(max(0, min(100, float(ppi) * 10 + 50)), 1)
+    if ctx.get("y10_pctile") is not None:
+        macro["利率水平"] = round(float(ctx["y10_pctile"]) * 100, 1)
+    if ctx.get("ep_premium_pctile") is not None:
+        macro["股债性价比"] = round(float(ctx["ep_premium_pctile"]) * 100, 1)
+    if len(macro) >= 3:
+        out["macro_radar"] = {"labels": list(macro), "values": list(macro.values())}
+    # 股债性价比仪表盘（半环）
+    if ctx.get("ep_premium_pctile") is not None:
+        out["ep_gauge"] = {"value": round(float(ctx["ep_premium_pctile"]) * 100, 1),
+                           "label": "股债性价比分位"}
     return out
 
 
@@ -1720,6 +1772,7 @@ def _main():
         tail = " ｜ ".join(x for x in (note, d) if x)
         L(f"- {nm}: {v}" + (f" ｜ {tail}" if tail else ""))
     ctx["macro"] = macro_ctx
+    ctx["macro_raw"] = macro_raw
 
     # ---------- 4. 黄金 ----------
     L("")
