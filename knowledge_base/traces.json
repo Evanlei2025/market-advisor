@@ -71,14 +71,14 @@
     "client": "Evan_Lei"
   },
   {
-    "T_eff": 0.2031,
-    "T_pre": 0.2729,
-    "T_cap": 0.2031,
-    "v_bench": 0.8170873786407767,
+    "T_eff": 0.2091,
+    "T_pre": 0.273,
+    "T_cap": 0.2091,
+    "v_bench": 0.8097826086956522,
     "factors": {
       "F_vol": 1.35,
       "F_hold": 1.1356,
-      "F_sector": 0.9891
+      "F_sector": 0.9894
     },
     "signal_date": "2026-08-11",
     "execute_date": "",
