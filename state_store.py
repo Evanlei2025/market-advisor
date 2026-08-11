@@ -235,7 +235,7 @@ DEFAULT_CLIENT = 'Evan_Lei'
 
 # 客户改名登记表：历史名称 → 当前名称。客户改名时在此登记；
 # 仅读取层归一（历史条目读取时视同新客户），不改写历史文件。
-CLIENT_ALIASES = {'Jing_Wang': 'Echo_Wang'}
+CLIENT_ALIASES = {'Jing_Wang': 'Echo_Wang', 'NULL_Xue': 'QunHui_Xue'}
 
 
 def _norm_client(entry):

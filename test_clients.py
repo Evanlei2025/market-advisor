@@ -26,7 +26,7 @@ def run():
     cfg = json.load(open("config.json", encoding="utf-8"))
     clients = main.get_clients(cfg)
     check("四客户解析", len(clients) == 4, f"n={len(clients)}")
-    check("客户ID顺序", [c["id"] for c in clients] == ["Evan_Lei", "Harley_Lei", "NULL_Xue", "Echo_Wang"],
+    check("客户ID顺序", [c["id"] for c in clients] == ["Evan_Lei", "Harley_Lei", "QunHui_Xue", "Echo_Wang"],
           str([c["id"] for c in clients]))
 
     evan = clients[0]["cfg"]
@@ -50,10 +50,10 @@ def run():
     check("Harley 继承 push", bool(harley.get("push", {}).get("serverchan_key")))
 
     nx = clients[2]["cfg"]
-    check("NULL_Xue 关注池=4", len(nx.get("products", [])) == 4
+    check("QunHui_Xue 关注池=4", len(nx.get("products", [])) == 4
           and {p.get("code") for p in nx.get("products", [])} == {"025687", "006195", "016347", "022720"},
           str([p.get("code") for p in nx.get("products", [])]))
-    check("NULL_Xue 仅现金持仓", len(nx.get("holdings", [])) == 1
+    check("QunHui_Xue 仅现金持仓", len(nx.get("holdings", [])) == 1
           and nx["holdings"][0]["type"] == "cash")
 
     jing = clients[3]["cfg"]
@@ -98,9 +98,9 @@ def run():
     state_store.kb_append_recommendations([{"name": "医药", "type": "industry", "reason": "x"}],
                                           client="Evan_Lei")
     state_store.kb_append_recommendations([{"name": "医药", "type": "industry", "reason": "x"}],
-                                          client="NULL_Xue")
+                                          client="QunHui_Xue")
     c_e = state_store.count_recent_recommendations("医药", days=30, client="Evan_Lei")
-    c_n = state_store.count_recent_recommendations("医药", days=30, client="NULL_Xue")
+    c_n = state_store.count_recent_recommendations("医药", days=30, client="QunHui_Xue")
     c_all = state_store.count_recent_recommendations("医药", days=30)
     check("推荐计数隔离", c_e == 1 and c_n == 1 and c_all == 2, f"e={c_e} n={c_n} all={c_all}")
 
