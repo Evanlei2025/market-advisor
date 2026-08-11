@@ -308,7 +308,7 @@ def _charts_html(charts):
                      '<canvas id="chVal"></canvas></div>')
         init.append(
             "var HUES=[%s];var HLine={id:'hline',afterDraw:function(c){"
-            "var yc=c.chart.area;[{v:50,col:cGrid},{v:80,col:cOrange}].forEach(function(l){"
+            "var yc=c.chartArea;[{v:50,col:cGrid},{v:80,col:cOrange}].forEach(function(l){"
             "var y=yc.top+(c.scales.y.getPixelForValue(l.v)-yc.top);"
             "if(c.scales.y.min<l.v&&l.v<c.scales.y.max){var g=c.ctx;g.save();"
             "g.strokeStyle=l.col;g.setLineDash([4,4]);g.lineWidth=1;"
@@ -718,7 +718,7 @@ _UI_JS = """
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   var open = {};
-  document.querySelectorAll('.group.open').forEach(function(g){ open[g.id] = 1; });
+  document.querySelectorAll('.group.open').forEach(function(g){ open[g.id.slice(1)] = 1; });
   function sync(h){
     var id = h.id, on = !!open[id];
     h.classList.toggle('open', on);
