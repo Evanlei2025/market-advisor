@@ -53,5 +53,12 @@
     "type": "industry",
     "reason": "上证红利 PE 8.55，分位91%偏高，但股息率有吸引力。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-11",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "PE分位91%偏高，但股息率优势或吸引资金，近5日累计上涨1.1%。",
+    "client": "Evan_Lei"
   }
 ]
