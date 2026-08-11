@@ -105,6 +105,14 @@
 - **A2 数据源审计**：docs/DATA_SOURCE_AUDIT.md（akshare 1.18.81 实测 5 维度）：持有人结构 ✅F10 cyrjg（半年报，675123 机构占比 98.72% 实测）；换手率 ✅fund_portfolio_change_em；债基杠杆 ✅F10 zcfzb（1.008x 实测）/久期信用 ✗降级 config；A/C 份额 ✅fund_name_em+雪球费率表；规模历史 ✅F10 gmbd 季度序列（天然 point-in-time 防重述）。4.5 项纳入迭代六接入候选，统一天天基金 F10 三通道解析器（cyrjg/gmbd/zcfzb）
 - 验证：四测试全绿（15/15+28/28+76/76+23/23）；强制端到端（patch 交易日）经理快照写入验证
 
+### 迭代六·G：NULL_Xue 改名 QunHui_Xue + 配置推送 SendKey（2026-08-11）
+- config.json：clients.NULL_Xue → QunHui_Xue（键序保持 Evan/Harley/QunHui/Echo）；配 SendKey SCT394129…（客户级 push 覆盖全局）
+- 别名机制：CLIENT_ALIASES 加 'NULL_Xue': 'QunHui_Xue'——历史状态数据（state_history 等）读取层自动归一，零数据迁移（复用 Jing_Wang→Echo_Wang 先例）
+- test_clients 5 处更新（客户顺序/关注池/持仓/推荐计数隔离）
+- 云端同步：sync_cloud 脚本升级——压缩 JSON + requests 库（urllib 对大 payload PUT 返回 400 malformed，requests 正常 204）；secret 更新 + push 触发重建
+- 云端验证：QunHui_Xue 报告生成（4 产品全展示），入口页 4 客户 08-11 全链接；P3 超时降级云端实测生效（融资融券 90s 超时降级「仅明细缺失，不影响指令」）
+- 回归：四测试 15/15+28/28+84/84+23/23
+
 ### 迭代六·F：云端同步修复 + Echo_Wang 导入关注池 + akshare 超时保护（2026-08-10）
 - **云端旧版根因**：workflow 仅 cron（工作日 15:35 北京）+ dispatch，push 不触发重建 → 云端 Pages 停留在 08-07 旧版；修复：workflow 增加 `on: push`（paths 过滤 **.py/requirements/.github，kb 数据 commit 不触发防循环）
 - **云端 secret 同步**：git credential token + GitHub API（libsodium 加密 PUT ADVISOR_CONFIG + workflow dispatch）；本地 config.json 与云端 secret 保持一致
