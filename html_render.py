@@ -59,6 +59,59 @@ _VAL_FINE_EQ = re.compile(r"(?:权益目标|权益上限)\s*[=＝]?\s*[^%，；�
 # 默认展开的章节（其余折叠；目录可随时点开）
 _OPEN_GROUPS = {"今日一句话", "理财产品跟踪", "今日跟投指令"}
 
+# ---------- 多级目录分组（新章节自动归入兜底组「参考附录」） ----------
+_TOC_CATEGORIES = [
+    ("核心指令", ["今日一句话", "今日跟投指令", "今日指令解读", "⚠ 异常事件预警", "异常事件预警", "执行回执"]),
+    ("市场概况", ["市场速览", "估值温度", "债市与利率", "宏观与资金面", "黄金"]),
+    ("持仓分析", ["理财产品跟踪", "组合诊断", "决策依据"]),
+    ("参考附录", ["指标温度表", "术语速查", "系统运行状态"]),
+]
+_TOC_FALLBACK = "参考附录"
+
+
+def _scan_counts(markdown_text):
+    """预扫描：每章节的裸 ** 产品标题行数 + 术语速查组行数（折叠 open 决策与按钮文案用）"""
+    prods, terms = {}, {}
+    cur = None
+    for ln in markdown_text.splitlines():
+        s = ln.strip()
+        if s.startswith("## "):
+            cur = s[3:].strip()
+            prods.setdefault(cur, 0)
+        elif cur is not None:
+            if s.startswith("**") and not s.startswith("- ") and not s.startswith(">"):
+                prods[cur] = prods.get(cur, 0) + 1
+            elif cur == "术语速查" and s.startswith("- "):
+                terms[cur] = terms.get(cur, 0) + 1
+    return prods, terms
+
+
+def _build_toc_panel(groups):
+    """多级目录面板 HTML（悬浮按钮 + 按逻辑分组链接）；无章节（入口页）返回空"""
+    if not groups:
+        return ""
+    cats, used = [], set()
+    for cat, pats in _TOC_CATEGORIES:
+        items = [g for g in groups if g not in used
+                 and any(g.startswith(p) or p in g for p in pats)]
+        if items:
+            cats.append((cat, items))
+            used.update(items)
+    rest = [g for g in groups if g not in used]
+    if rest:
+        cats.append((_TOC_FALLBACK, rest))
+    idx = {g: i + 1 for i, g in enumerate(groups)}
+    parts = ['<aside class="toc-panel">',
+             '<button type="button" class="toc-toggle" aria-label="目录">目录</button>',
+             '<nav class="toc-nav">']
+    for cat, items in cats:
+        parts.append(f'<details class="toc-cat" open><summary>{html_lib.escape(cat)}</summary>')
+        for g in items:
+            parts.append(f'<a href="#sec-{idx[g]}">{html_lib.escape(g)}</a>')
+        parts.append("</details>")
+    parts.append("</nav></aside>")
+    return "".join(parts)
+
 
 def _pct_hue(n):
     """分位 → 温度色相：0%=210(蓝) … 100%=0(红)，iOS 财富温度约定"""
@@ -205,13 +258,8 @@ def _render_li_body(line, cards=True):
 
 
 def _render_p(line):
-    """裸段落行：产品标题行 → .prod；说明行 → .note"""
+    """裸段落行：说明行 → .note；其余普通段落（产品标题行由 render 主循环拦截处理）"""
     raw = line.strip()
-    m = _PROD_ROW.match(raw)
-    if m and not _TERM_ROW.match(raw):
-        inner = _inline(m.group(1))
-        tail = _inline(m.group(2)) if m.group(2) else ""
-        return ("<p class='prod'>%s%s</p>" % (inner, tail and ("<span class='prod-type'>%s</span>" % tail) or ""))
     if _NOTE_P.match(raw) or raw.startswith("*"):
         return "<p class='note'>%s</p>" % _inline(raw)
     return "<p>%s</p>" % _inline(raw)
@@ -324,7 +372,7 @@ body {
   border-bottom: .5px solid var(--sep2);
 }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .navbar, .toc { background: var(--bg); }
+  .navbar { background: var(--bg); }
 }
 .nav-inner { width: min(100% - 40px, 1150px); margin: 0 auto; padding: 10px 0;
              display: flex; align-items: baseline; gap: 10px; }
@@ -335,24 +383,44 @@ h1 {
   font-size: 34px; line-height: 1.15; font-weight: 700; letter-spacing: -0.3px;
   margin: 10px 4px 4px; padding: 0; border: none;
 }
-/* ---------- 目录条（sticky，胶囊横向滚动） ---------- */
-.toc {
-  position: sticky; top: 0; z-index: 9;
-  background: var(--nav-bg);
-  -webkit-backdrop-filter: blur(20px) saturate(1.8); backdrop-filter: blur(20px) saturate(1.8);
-  border-bottom: .5px solid var(--sep2);
-  overflow-x: auto; white-space: nowrap; scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
-}
-.toc::-webkit-scrollbar { display: none; }
-.toc-inner { width: min(100% - 40px, 1150px); margin: 0 auto; padding: 8px 0; display: flex; gap: 6px; }
-.toc-btn {
-  flex: 0 0 auto; border: none; cursor: pointer;
-  font-family: inherit; font-size: 13px; font-weight: 600; color: var(--text2);
-  background: var(--card2); padding: 6px 12px; border-radius: 999px;
+/* ---------- 多级目录面板（悬浮按钮 + 分组导航） ---------- */
+.toc-panel { position: fixed; bottom: 20px; right: 20px; z-index: 20; }
+.toc-toggle {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--blue); color: #fff; border: none;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,122,255,.3);
   -webkit-tap-highlight-color: transparent;
 }
-.toc-btn.cur { background: var(--blue); color: #fff; }
+.toc-nav {
+  display: none; position: absolute; bottom: 56px; right: 0;
+  width: 224px; max-height: 70vh; overflow-y: auto;
+  background: var(--card); border-radius: 16px;
+  box-shadow: var(--shadow); padding: 10px 0;
+}
+.toc-panel.open .toc-nav { display: block; }
+.toc-cat { padding: 0 12px; }
+.toc-cat summary {
+  font-size: 13px; font-weight: 700; color: var(--text2);
+  padding: 8px 4px 6px; cursor: pointer; list-style: none;
+}
+.toc-cat summary::-webkit-details-marker { display: none; }
+.toc-cat summary::before { content: "▸ "; font-size: 11px; color: var(--text3); }
+.toc-cat[open] summary::before { content: "▾ "; }
+.toc-cat a {
+  display: block; font-size: 13px; color: var(--text3);
+  padding: 6px 4px 6px 18px; text-decoration: none;
+  border-radius: 8px;
+}
+.toc-cat a:hover { background: var(--card2); color: var(--text); }
+@media (min-width: 1400px) {
+  .toc-panel { position: fixed; top: 100px; right: 40px; bottom: auto; }
+  .toc-toggle { display: none; }
+  .toc-nav { display: block; position: static; bottom: auto; width: 230px; }
+}
+@media (max-width: 640px) {
+  .toc-panel { bottom: 14px; right: 14px; }
+}
 /* ---------- 章节（折叠手风琴） ---------- */
 .group-h {
   font-size: 15px; font-weight: 600; color: var(--text);
@@ -386,7 +454,33 @@ h1 {
 .group > p { margin: 0; padding: 10px 16px; }
 .group > p:empty { display: none; }
 .group > p + p { border-top: .5px solid var(--sep2); }
-.group > p.prod, .group > p.prod + p { border-top: none; }
+/* 产品折叠块（details/summary 原生折叠） */
+.prod-detail { border-radius: 12px; margin: 6px 12px; }
+.prod-detail > summary {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  background: var(--card2); font-size: 16px; font-weight: 700;
+  border-radius: 12px; padding: 10px 14px; cursor: pointer;
+  list-style: none; -webkit-tap-highlight-color: transparent;
+}
+.prod-detail > summary::-webkit-details-marker { display: none; }
+.prod-detail > summary::after {
+  content: "▾"; margin-left: auto; font-size: 12px; color: var(--text3);
+  align-self: center;
+}
+.prod-detail:not([open]) > summary::after { content: "▸"; }
+.prod-detail > summary strong { font-size: 16px; font-weight: 700; }
+.prod-detail > summary .prod-type { font-size: 13px; font-weight: 500; color: var(--text3); }
+.prod-detail > ul { border-top: .5px solid var(--sep2); margin-top: 0; }
+/* 术语速查折叠 */
+.fold-section { padding: 4px 0; }
+.fold-btn {
+  font-size: 14px; color: var(--blue); cursor: pointer;
+  font-weight: 600; list-style: none; padding: 12px 16px;
+  -webkit-tap-highlight-color: transparent;
+}
+.fold-btn::-webkit-details-marker { display: none; }
+.fold-btn::after { content: " ▸"; font-size: 12px; }
+.fold-section[open] .fold-btn::after { content: " ▾"; }
 ul { list-style: none; margin: 0; padding: 0; }
 li {
   display: flex; flex-direction: column; gap: 2px;
@@ -436,14 +530,6 @@ strong { font-weight: 600; }
 .warn-line { color: var(--red); }
 .warn-line strong { color: var(--red); }
 .note, .note em { color: var(--text3); font-size: 14px; }
-.group .prod {
-  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
-  background: var(--card2); font-size: 16px; font-weight: 700;
-  border-radius: 12px; margin: 12px 12px 4px; padding: 10px 14px;
-}
-.group .prod + p { border-top: none; }
-.group .prod strong { font-size: 16px; font-weight: 700; }
-.prod-type { font-size: 13px; font-weight: 500; color: var(--text3); }
 .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
                gap: 1px; background: var(--sep2); }
 .metric { background: var(--card); padding: 14px 16px; }
@@ -491,7 +577,6 @@ code { background: var(--card2); padding: 1px 6px; border-radius: 6px; font-size
   h1 { font-size: 30px; }
   .page { width: min(100% - 24px, 1150px); padding: 14px 0 40px; }
   .nav-inner { width: min(100% - 24px, 1150px); padding: 10px 0; }
-  .toc-inner { width: min(100% - 24px, 1150px); padding: 8px 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   body, .group { animation: none; }
@@ -518,23 +603,19 @@ document.addEventListener('DOMContentLoaded',function(){
     });
   });
   var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  var btns = document.querySelectorAll('.toc-btn');
-  btns.forEach(function(b){
-    b.addEventListener('click', function(){
-      var h = document.querySelector('.group-h[data-i="' + b.dataset.i + '"]');
-      if (h && !open[h.id]) { open[h.id] = 1; sync(h); }
-      if (h) h.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
-    });
-  });
-  if ('IntersectionObserver' in window) {
-    var io = new IntersectionObserver(function(es){
-      es.forEach(function(e){
-        if (e.isIntersecting) {
-          btns.forEach(function(b){ b.classList.toggle('cur', b.dataset.i === e.target.dataset.i); });
-        }
+  var tp = document.querySelector('.toc-panel');
+  if (tp) {
+    var tgl = tp.querySelector('.toc-toggle');
+    if (tgl) tgl.addEventListener('click', function(){ tp.classList.toggle('open'); });
+    tp.querySelectorAll('.toc-cat a').forEach(function(a){
+      a.addEventListener('click', function(){
+        var id = a.getAttribute('href').slice(1);
+        var h = document.getElementById(id);
+        if (h && !open[id]) { open[id] = 1; sync(h); }
+        if (h) h.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+        tp.classList.remove('open');
       });
-    }, { rootMargin: '-80px 0px -70% 0px' });
-    document.querySelectorAll('.group-h').forEach(function(h){ io.observe(h); });
+    });
   }
 });
 </script>
@@ -542,14 +623,19 @@ document.addEventListener('DOMContentLoaded',function(){
 
 
 def render(markdown_text, title="每日投顾报告", charts=None):
-    """markdown → HTML 页面（iOS 原生质感；目录/折叠卡片/列表/表格/分隔线/段落/图表/可视化）。"""
+    """markdown → HTML 页面（iOS 原生质感；多级目录/折叠卡片/列表/表格/分隔线/段落/图表/可视化）。"""
     body = []
     groups = []
+    prod_counts, term_counts = _scan_counts(markdown_text)
     in_list = False
     in_blockquote = False
     in_code = False
     in_table = False
     in_group = False
+    in_prod_detail = False
+    in_fold_section = False
+    cur_heading = ""
+    prod_idx = 0
     metrics = []
     table_rows = []
 
@@ -585,18 +671,29 @@ def render(markdown_text, title="每日投顾报告", charts=None):
             in_table = False
             table_rows = []
 
+    def close_prod_detail():
+        nonlocal in_prod_detail
+        if in_prod_detail:
+            body.append("</details>")
+            in_prod_detail = False
+
     def close_group():
-        nonlocal in_group
+        nonlocal in_group, in_fold_section
         if in_group:
-            close_list(); close_quote(); close_table(); close_metrics()
+            close_list(); close_quote(); close_table(); close_metrics(); close_prod_detail()
+            if in_fold_section:
+                body.append("</details>")
+                in_fold_section = False
             body.append("</div>")
             in_group = False
 
     def open_group(heading):
-        nonlocal in_group
+        nonlocal in_group, in_fold_section, cur_heading, prod_idx
         close_group()
         n = len(groups) + 1
         groups.append(heading)
+        cur_heading = heading
+        prod_idx = 0
         is_open = heading in _OPEN_GROUPS
         cls = "group-h open" if is_open else "group-h"
         gcls = "group open" if is_open else "group"
@@ -604,7 +701,14 @@ def render(markdown_text, title="每日投顾报告", charts=None):
             gcls += " hero"
         body.append(f'<h2 class="{cls}" id="sec-{n}" data-i="{n}">'
                     f'{_inline(heading)}<span class="chev">▸</span></h2>')
-        body.append(f"<div class='{gcls}' id='gsec-{n}'>")
+        if heading == "术语速查":
+            n_terms = term_counts.get(heading, 0)
+            body.append(f"<div class='{gcls}' id='gsec-{n}'>"
+                        f"<details class='fold-section'><summary class='fold-btn'>"
+                        f"展开术语说明（{n_terms} 条）</summary>")
+            in_fold_section = True
+        else:
+            body.append(f"<div class='{gcls}' id='gsec-{n}'>")
         in_group = True
 
     for raw in markdown_text.splitlines():
@@ -686,7 +790,21 @@ def render(markdown_text, title="每日投顾报告", charts=None):
             body.append("<hr/>")
         else:
             close_list(); close_quote(); close_metrics()
-            body.append(_render_p(line))
+            m = _PROD_ROW.match(line.strip())
+            if m and not _TERM_ROW.match(line.strip()):
+                close_prod_detail()
+                prod_idx += 1
+                total = prod_counts.get(cur_heading, 0)
+                open_attr = " open" if (total <= 2 or prod_idx == 1) else ""
+                inner = _inline(m.group(1))
+                tail = _inline(m.group(2)) if m.group(2) else ""
+                body.append(
+                    f"<details class='prod-detail'{open_attr}>"
+                    f"<summary class='prod'>{inner}"
+                    f"{tail and ('<span class=\"prod-type\">%s</span>' % tail) or ''}</summary>")
+                in_prod_detail = True
+            else:
+                body.append(_render_p(line))
     close_group()
     close_list(); close_quote(); close_table()
     if in_code:
@@ -700,11 +818,7 @@ def render(markdown_text, title="每日投顾报告", charts=None):
     else:
         brand = title
 
-    toc = ""
-    if groups:
-        toc = ('<nav class="toc"><div class="toc-inner">' + "".join(
-            f'<button type="button" class="toc-btn" data-i="{i}">{html_lib.escape(g)}</button>'
-            for i, g in enumerate(groups, 1)) + "</div></nav>")
+    toc_panel = _build_toc_panel(groups)
 
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -721,11 +835,11 @@ def render(markdown_text, title="每日投顾报告", charts=None):
 <header class="navbar"><div class="nav-inner">
 <span class="nav-brand">{html_lib.escape(brand)}</span><span class="nav-sub">{html_lib.escape(sub)}</span>
 </div></header>
-{toc}
 <div class="page">
 {_charts_html(charts)}
 {''.join(body)}
 </div>
+{toc_panel}
 {_UI_JS}
 </body>
 </html>"""
