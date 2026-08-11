@@ -347,7 +347,7 @@ def _charts_html(charts):
             "ctx.fillStyle=cFg;ctx.font='700 24px -apple-system,PingFang SC,sans-serif';"
             "ctx.fillText('¥'+tot.toLocaleString(),cx,cy-8);"
             "ctx.font='12px -apple-system,PingFang SC,sans-serif';"
-            "ctx.fillText('总市值',cx,cy+16);}}])" % (
+            "ctx.fillText('总市值',cx,cy+16);}}]})" % (
                 json.dumps(charts["allocation"]["labels"], ensure_ascii=False),
                 json.dumps(charts["allocation"]["values"])))
     if charts.get("nav"):
