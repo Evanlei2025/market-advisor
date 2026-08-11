@@ -105,6 +105,13 @@
 - **A2 数据源审计**：docs/DATA_SOURCE_AUDIT.md（akshare 1.18.81 实测 5 维度）：持有人结构 ✅F10 cyrjg（半年报，675123 机构占比 98.72% 实测）；换手率 ✅fund_portfolio_change_em；债基杠杆 ✅F10 zcfzb（1.008x 实测）/久期信用 ✗降级 config；A/C 份额 ✅fund_name_em+雪球费率表；规模历史 ✅F10 gmbd 季度序列（天然 point-in-time 防重述）。4.5 项纳入迭代六接入候选，统一天天基金 F10 三通道解析器（cyrjg/gmbd/zcfzb）
 - 验证：四测试全绿（15/15+28/28+76/76+23/23）；强制端到端（patch 交易日）经理快照写入验证
 
+### 迭代六·H：报告网页多级目录与长内容折叠（2026-08-11，按规划文件 c3b9e651 执行）
+- **删除顶部 toc 胶囊条**：toc-btn/toc-inner/IntersectionObserver 高亮全部移除
+- **多级目录悬浮面板**：`_TOC_CATEGORIES` 四分组（核心指令/市场概况/持仓分析/参考附录），startswith+包含匹配，未归类章节兜底参考附录；`_build_toc_panel` 生成 details/summary 分组导航；移动端右下角 48px 圆形「目录」按钮（点击展开 224px 面板），桌面 ≥1400px 右侧常驻 230px 侧栏（按钮隐藏）；点击链接展开章节+平滑滚动+移动端自动收面板
+- **长篇内容折叠**（原生 details/summary，零 JS）：产品跟踪每产品独立折叠块——`_scan_counts` 预扫描章节产品数，≤2 产品全 open、≥3 仅首个 open（实测 Evan 3→1、Harley 2→2、QunHui 4→1、Echo 5→1）；新闻哨兵「一级警报」块同样折叠；术语速查整组折叠（按钮带条数「展开术语说明（N 条）」）
+- 入口页（无章节）不生成目录元素；CSS/JS 清理无残留
+- 验证：4 客户 08-11 页面结构闭合 + 目录 4 组 + 折叠分布断言；四测试 15/15+28/28+84/84+23/23；e2e 全量重生成；push a77f161 云端自动重建
+
 ### 迭代六·G：NULL_Xue 改名 QunHui_Xue + 配置推送 SendKey（2026-08-11）
 - config.json：clients.NULL_Xue → QunHui_Xue（键序保持 Evan/Harley/QunHui/Echo）；配 SendKey SCT394129…（客户级 push 覆盖全局）
 - 别名机制：CLIENT_ALIASES 加 'NULL_Xue': 'QunHui_Xue'——历史状态数据（state_history 等）读取层自动归一，零数据迁移（复用 Jing_Wang→Echo_Wang 先例）
