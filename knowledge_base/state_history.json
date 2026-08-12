@@ -273,8 +273,8 @@
     "date": "2026-08-12",
     "orders": [],
     "target_alloc": {
-      "equity": 0.2766304347826087,
-      "bond": 0.6233695652173913,
+      "equity": 0.2788901823826155,
+      "bond": 0.6211098176173845,
       "cash": 0.1
     },
     "pending_cash": [
@@ -302,7 +302,7 @@
     "total_mv": 873.22965,
     "tp_signals": [],
     "storm_active": false,
-    "eq_target": 0.2766304347826087,
+    "eq_target": 0.2788901823826155,
     "client": "Evan_Lei"
   },
   {
