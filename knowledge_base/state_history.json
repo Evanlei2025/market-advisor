@@ -277,14 +277,30 @@
       "bond": 0.6233695652173913,
       "cash": 0.1
     },
-    "pending_cash": [],
-    "total_mv": 2499.261015,
-    "tp_signals": [
+    "pending_cash": [
       {
         "code": "006195",
-        "action": "tp_dd"
+        "side": "赎回",
+        "shares": 233.55,
+        "amount": 758.22,
+        "apply_date": "2026-08-10",
+        "confirm_date": "2026-08-11",
+        "settle_date": "2026-08-13",
+        "note": "用户赎回全部份额（确认净值3.2465，手续费0）"
+      },
+      {
+        "code": "014846",
+        "side": "赎回",
+        "shares": 703.65,
+        "amount": 874.36,
+        "apply_date": "2026-08-10",
+        "confirm_date": "2026-08-11",
+        "settle_date": "2026-08-13",
+        "note": "用户赎回部分份额，FIFO扣减最早批次（确认净值1.2426，手续费0）"
       }
     ],
+    "total_mv": 873.22965,
+    "tp_signals": [],
     "storm_active": false,
     "eq_target": 0.2766304347826087,
     "client": "Evan_Lei"
