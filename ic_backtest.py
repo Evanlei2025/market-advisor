@@ -304,21 +304,37 @@ def bench_for(ptype, bench_index, fetcher, use_cache=True):
 
 
 def trailing_maxdd(nav, w=LOOKBACK, minp=MIN_WIN):
-    n = len(nav)
+    # 向量化：尾部窗口 drawdown 用 sliding_window_view 一次性计算，
+    # 起始不足一个完整窗口的前缀段用累计 min 复用同一 cummax/dd 序列。
+    from numpy.lib.stride_tricks import sliding_window_view
+    arr = np.asarray(nav.values, dtype=float)
+    n = len(arr)
     vals = np.full(n, np.nan)
-    arr = nav.values.astype(float)
-    for i in range(n):
-        lo = max(0, i - w + 1)
-        seg = arr[lo:i + 1]
-        if len(seg) < minp:
-            continue
-        peak = np.maximum.accumulate(seg)
-        vals[i] = float((seg / peak - 1.0).min())
+    if n == 0:
+        return pd.Series(vals, index=nav.index)
+    # 前缀段（窗口起点 < 0 → seg = arr[0:i+1]）的 drawdown 直接用全局 cummax
+    cummax = np.maximum.accumulate(arr)
+    dd_series = arr / cummax - 1.0
+    prefix_min_dd = np.minimum.accumulate(dd_series)
+    end_partial = min(w - 1, n)
+    for i in range(minp - 1, end_partial):
+        vals[i] = prefix_min_dd[i]
+    # 完整窗口段：sliding_window_view + 沿轴 cummax → 与逐段循环数值等价
+    if n >= w:
+        windows = sliding_window_view(arr, w)            # shape (n-w+1, w)
+        peaks = np.maximum.accumulate(windows, axis=1)
+        dd = (windows / peaks - 1.0).min(axis=1)
+        vals[w - 1:] = dd
     return pd.Series(vals, index=nav.index)
 
 
 def _roll_prod(r, w=LOOKBACK, minp=MIN_WIN):
-    return r.rolling(w, min_periods=minp).apply(lambda x: (1.0 + x).prod() - 1.0, raw=True)
+    # C 级 rolling sum of logs 替代 Python lambda，与 (1+x).prod()-1 数学等价
+    log_cum = np.log1p(r).rolling(w, min_periods=minp).sum()
+    out = np.exp(log_cum) - 1.0
+    if not isinstance(out, pd.Series):
+        out = pd.Series(out, index=r.index)
+    return out
 
 
 def product_factors(nav, bench_close, rf):
@@ -486,6 +502,182 @@ def aggregate(rows):
     return out
 
 
+def bootstrap_icir_ci(ics, n_boot=2000, ci=0.95, seed=42):
+    """ICIR 的 bootstrap 置信区间。
+    ics: IC 值列表
+    返回 {'lo': float, 'hi': float} 或 None（样本不足）
+    """
+    arr = np.array(ics, dtype=float)
+    n = len(arr)
+    if n < 5:
+        return None
+    rng = np.random.RandomState(seed)
+    boot_icirs = []
+    for _ in range(n_boot):
+        sample = rng.choice(arr, size=n, replace=True)
+        s = sample.std(ddof=1) if len(sample) > 1 else 0.0
+        if s > 0:
+            boot_icirs.append(sample.mean() / s)
+    if len(boot_icirs) < 10:
+        return None
+    lo = float(np.percentile(boot_icirs, (1 - ci) / 2 * 100))
+    hi = float(np.percentile(boot_icirs, (1 + ci) / 2 * 100))
+    return {'lo': lo, 'hi': hi}
+
+
+def ic_half_life(aligned, D, factor, horizons=None, min_n=4, years=5):
+    """因子 IC 衰减半衰期。在多前瞻期计算 IC，拟合指数衰减。
+    返回 {'half_life': float|None, 'r_squared': float}
+    """
+    if horizons is None:
+        horizons = [5, 10, 21, 63, 126, 250]
+    ic_means = []
+    valid_h = []
+    for h in horizons:
+        if h > len(D):
+            continue
+        # walk_ic(aligned, D, H, step, embargo, min_n, years) → (rows, ts)
+        rows_h, _ = walk_ic(aligned, D, h, max(h // 2, 10), max(h // 4, 5), min_n, years)
+        if not rows_h:
+            continue
+        fac_rows = [(t, f, ic) for t, f, ic in rows_h if f == factor]
+        if len(fac_rows) < min_n:
+            continue
+        ics = [ic for _, _, ic in fac_rows]
+        ic_means.append(np.mean(ics))
+        valid_h.append(h)
+    if len(valid_h) < 3:
+        return {'half_life': None, 'r_squared': 0.0}
+    h_arr = np.array(valid_h, dtype=float)
+    ic_arr = np.array(ic_means)
+    y = np.abs(ic_arr)
+    log_y = np.log(y + 1e-8)
+    coeffs = np.polyfit(h_arr, log_y, 1)
+    slope = coeffs[0]
+    y_pred = np.polyval(coeffs, h_arr)
+    ss_res = float(np.sum((log_y - y_pred) ** 2))
+    ss_tot = float(np.sum((log_y - log_y.mean()) ** 2))
+    r_sq = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    if slope >= 0:
+        return {'half_life': None, 'r_squared': r_sq}
+    tau = -1.0 / slope
+    half_life = float(tau * np.log(2))
+    return {'half_life': half_life, 'r_squared': r_sq}
+
+
+def regime_split(D, bench_series, window=250):
+    """按基准 250 日滚动收益分市场状态。
+    返回 {date: 'bull'|'bear'|'sideways'} 字典
+    """
+    if bench_series is None or len(bench_series) < window:
+        return {}
+    roll_ret = bench_series.rolling(window).apply(lambda x: (1 + x).prod() - 1, raw=True)
+    regimes = {}
+    for d in D:
+        if d in roll_ret.index:
+            r = roll_ret.loc[d]
+            if r == r:
+                if r > 0.10:
+                    regimes[d] = 'bull'
+                elif r < -0.10:
+                    regimes[d] = 'bear'
+                else:
+                    regimes[d] = 'sideways'
+    return regimes
+
+
+def conditional_ic(aligned, D, H, step, embargo, min_n, years, regimes):
+    """分市场状态计算 IC/ICIR。返回 {regime: {factor: {n, mean, std, icir, pos}}}
+    walk_ic 返回 (rows, ts)；rows 中 t 为整数索引，需用 D[t] 映射到日期再查 regimes。
+    """
+    rows, _ = walk_ic(aligned, D, H, step, embargo, min_n, years)
+    result = {}
+    for regime_name in ('bull', 'bear', 'sideways'):
+        regime_rows = [(t, f, ic) for t, f, ic in rows if regimes.get(D[t]) == regime_name]
+        if len(regime_rows) < min_n:
+            result[regime_name] = {}
+            continue
+        agg = aggregate(regime_rows)
+        result[regime_name] = agg
+    return result
+
+
+def portfolio_backtest(aligned, D, factor, H, min_n=4, top_pctile=0.67, years=5):
+    """因子→组合回测：每截面按因子值排名选 top 分位，等权构建组合。
+    aligned 为 list[dict]（与 cross_section 同结构）；标签用风格中性超额（产品复权收益 - 基准同期）。
+    返回 {'cumret': float, 'sharpe': float, 'max_dd': float, 'ir': float|None, 'n_periods': int} 或 None
+    """
+    # step=H 使各截面间距 ≥ H，标签无重叠；embargo 仍施加
+    rows, _ = walk_ic(aligned, D, H, H, max(H // 4, 5), min_n, years)
+    port_rets = []
+    bench_rets = []
+    for t, fac, _ in rows:
+        if fac != factor:
+            continue
+        xs = []  # (code, factor_value, fwd_excess_ret)
+        for p in aligned:
+            nav_ff = p['nav']
+            fresh_nav = p['fresh']
+            if t + H >= len(nav_ff):
+                continue
+            if not (bool(fresh_nav.iloc[t]) and bool(fresh_nav.iloc[t + H])):
+                continue
+            nav_t = nav_ff.iloc[t]
+            nav_th = nav_ff.iloc[t + H]
+            if nav_t is None or nav_t != nav_t or nav_th is None or nav_th != nav_th:
+                continue
+            # 因子值（与 cross_section 同款取数）
+            x = None
+            if factor in ('tco', 'tco_ongoing'):
+                x = p.get(factor)
+            elif factor in p['fac']:
+                ff, fr = p['fac'][factor]
+                if bool(fr.iloc[t]):
+                    x = ff.iloc[t]
+            if x is None or x != x:
+                continue
+            # 前瞻风格中性超额 = 产品收益 - 基准同期收益
+            lab = None
+            bench_ff = p.get('bench')
+            b_fresh = p.get('bench_fresh')
+            if bench_ff is not None:
+                ok_bf = True
+                if b_fresh is not None:
+                    ok_bf = bool(b_fresh.iloc[t]) and bool(b_fresh.iloc[t + H])
+                if ok_bf:
+                    b_t = bench_ff.iloc[t]
+                    b_th = bench_ff.iloc[t + H]
+                    if b_t is not None and b_t == b_t and b_th is not None and b_th == b_th:
+                        lab = (nav_th / nav_t - 1.0) - (b_th / b_t - 1.0)
+            if lab is None:
+                continue
+            xs.append((p['code'], float(x), float(lab)))
+        if len(xs) < min_n:
+            continue
+        xs.sort(key=lambda z: z[1], reverse=True)
+        n_top = max(1, int(len(xs) * top_pctile))
+        top = xs[:n_top]
+        port_ret = np.mean([z[2] for z in top])
+        bench_ret = np.mean([z[2] for z in xs])
+        port_rets.append(port_ret)
+        bench_rets.append(bench_ret)
+    if len(port_rets) < min_n:
+        return None
+    pr = np.array(port_rets)
+    br = np.array(bench_rets)
+    cumret = float(np.prod(1 + pr) - 1)
+    ann_ret = pr.mean() * (250.0 / H)
+    ann_vol = pr.std(ddof=1) * np.sqrt(250.0 / H) if len(pr) > 1 else 0.0
+    sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
+    nav = np.cumprod(1 + pr)
+    max_dd = float(np.min(nav / np.maximum.accumulate(nav) - 1))
+    excess = pr - br
+    te = excess.std(ddof=1) * np.sqrt(250.0 / H) if len(excess) > 1 else 0.0
+    ir = (excess.mean() * (250.0 / H)) / te if te > 0 else None
+    return {'cumret': cumret, 'sharpe': float(sharpe), 'max_dd': max_dd,
+            'ir': float(ir) if ir is not None else None, 'n_periods': len(port_rets)}
+
+
 def deoverlap_icir(rows, H, min_n):
     acc = {}
     last = {}
@@ -568,7 +760,8 @@ def _fmt(x, nd=3):
     return ('%.' + str(nd) + 'f') % x
 
 
-def build_report(args, products, D, results, rows_by_h, ts_by_h, skipped, weights, combined_icir):
+def build_report(args, products, D, results, rows_by_h, ts_by_h, skipped, weights, combined_icir,
+                 aligned=None, bench_series=None):
     lines = []
     lines.append('# IC 回测报告（score_candidate V3.1 权重验证）')
     lines.append('')
@@ -638,6 +831,103 @@ def build_report(args, products, D, results, rows_by_h, ts_by_h, skipped, weight
     lines.append('- 基准时点：指数点位为收盘价序列，无成分调整处理（指数点位本身无前视）。')
     lines.append('- IC 截面小（产品池 ~%d 个），ICIR 估计噪声大，结论仅作权重微调参考，不自动改权重表。' % len(products))
     lines.append('')
+    # ===== 进阶诊断板块（修改 4-7 集成）=====
+    if aligned is not None:
+        # --- ICIR bootstrap 置信区间 ---
+        lines.append('## ICIR Bootstrap 置信区间')
+        lines.append('')
+        lines.append('基于重采样（n_boot=2000，seed=42）的 ICIR 95% 置信区间，量化小样本 ICIR 点估的不确定性（区间跨 0 → 预测力不稳健）。')
+        lines.append('')
+        for H in sorted(rows_by_h.keys()):
+            rows = rows_by_h[H]
+            lines.append('### 前瞻 %d 个月' % H)
+            lines.append('')
+            lines.append('| 因子 | 样本n | ICIR点估 | CI下限 | CI上限 | 跨0? |')
+            lines.append('|---|---|---|---|---|---|')
+            for fac in FACTORS:
+                ics = [ic for (t, f, ic) in rows if f == fac]
+                if len(ics) < 5:
+                    continue
+                arr_s = pd.Series(ics)
+                m = float(arr_s.mean())
+                s = float(arr_s.std(ddof=1)) if len(arr_s) > 1 else 0.0
+                pt = m / s if s > 0 else 0.0
+                ci = bootstrap_icir_ci(ics)
+                if ci is None:
+                    continue
+                cross_zero = '是' if ci['lo'] <= 0.0 <= ci['hi'] else '否'
+                lines.append('| %s | %d | %s | %s | %s | %s |'
+                             % (FAC_NAMES.get(fac, fac), len(ics), _fmt(pt),
+                                _fmt(ci['lo']), _fmt(ci['hi']), cross_zero))
+            lines.append('')
+        # --- IC 半衰期 ---
+        lines.append('## IC 半衰期（因子预测力衰减）')
+        lines.append('')
+        lines.append('多前瞻期（5/10/21/63/126/250 交易日）IC 均值拟合指数衰减 |IC|≈exp(-h/τ)，半衰期=τ·ln2；R² 越高衰减拟合越可信。')
+        lines.append('')
+        lines.append('| 因子 | 半衰期(交易日) | 拟合R² |')
+        lines.append('|---|---|---|')
+        for fac in FACTORS:
+            hl = ic_half_life(aligned, D, fac, years=args.years)
+            lines.append('| %s | %s | %s |'
+                         % (FAC_NAMES.get(fac, fac),
+                            _fmt(hl['half_life'], 1) if hl['half_life'] is not None else '—',
+                            _fmt(hl['r_squared'])))
+        lines.append('')
+        # --- Conditional IC（分市场状态）---
+        regimes = regime_split(D, bench_series, window=250) if bench_series is not None else {}
+        if regimes:
+            n_bull = sum(1 for v in regimes.values() if v == 'bull')
+            n_bear = sum(1 for v in regimes.values() if v == 'bear')
+            n_side = sum(1 for v in regimes.values() if v == 'sideways')
+            lines.append('## Conditional IC（分市场状态）')
+            lines.append('')
+            lines.append('按沪深300 250 日滚动收益划分状态（bull>10%% / bear<-10%% / 其余 sideways），样本日数 bull=%d / bear=%d / sideways=%d。'
+                         % (n_bull, n_bear, n_side))
+            lines.append('')
+            for H in sorted(rows_by_h.keys()):
+                cond = conditional_ic(aligned, D, H_DAYS[H], args.step, args.embargo, args.min_n,
+                                     args.years, regimes)
+                lines.append('### 前瞻 %d 个月' % H)
+                lines.append('')
+                lines.append('| 状态 | 因子 | n | IC均值 | ICIR | IC>0占比 |')
+                lines.append('|---|---|---|---|---|---|')
+                for regime_name in ('bull', 'bear', 'sideways'):
+                    agg = cond.get(regime_name, {})
+                    for fac in FACTORS:
+                        if fac not in agg:
+                            continue
+                        a = agg[fac]
+                        if a['n'] == 0:
+                            continue
+                        lines.append('| %s | %s | %d | %s | %s | %.0f%% |'
+                                     % (regime_name, FAC_NAMES.get(fac, fac), a['n'],
+                                        _fmt(a['mean']), _fmt(a['icir']), a['pos'] * 100.0))
+                lines.append('')
+        else:
+            lines.append('## Conditional IC（分市场状态）')
+            lines.append('')
+            lines.append('基准序列不足 250 个交易日，无法划分市场状态，跳过。')
+            lines.append('')
+        # --- Portfolio backtest ---
+        lines.append('## Portfolio Backtest（因子→组合）')
+        lines.append('')
+        lines.append('每截面按因子值降序选 top 分位（top_pctile=0.67）等权构建组合，对比全样本等权基准；标签为风格中性超额，故 cumret 为累计超额收益。')
+        lines.append('')
+        for H in sorted(rows_by_h.keys()):
+            lines.append('### 前瞻 %d 个月' % H)
+            lines.append('')
+            lines.append('| 因子 | 截面数 | 累计超额 | 年化夏普 | 最大回撤 | 信息比率 |')
+            lines.append('|---|---|---|---|---|---|')
+            for fac in FACTORS:
+                pb = portfolio_backtest(aligned, D, fac, H_DAYS[H], min_n=args.min_n, years=args.years)
+                if pb is None:
+                    continue
+                lines.append('| %s | %d | %s | %s | %s | %s |'
+                             % (FAC_NAMES.get(fac, fac), pb['n_periods'], _fmt(pb['cumret']),
+                                _fmt(pb['sharpe']), _fmt(pb['max_dd']),
+                                _fmt(pb['ir']) if pb['ir'] is not None else '—'))
+            lines.append('')
     return chr(10).join(lines)
 
 
@@ -682,6 +972,13 @@ def main():
         bench_pool[sym] = load_bench(fetcher, sym, use_cache)
     bench_pool['composite'] = composite_bench(fetcher, use_cache)
     bench_pool['gold'] = load_gold_bench(fetcher, use_cache)
+    # 沪深300 日收益率序列 → regime_split 市场状态划分用（修改 6 集成）
+    bench_ret_series = None
+    _bdf = bench_pool.get('sh000300')
+    if _bdf is not None and len(_bdf) >= 2:
+        _bidx = pd.DatetimeIndex(_bdf['date'])
+        _bclose = pd.Series(_bdf['close'].values, index=_bidx).sort_index()
+        bench_ret_series = _bclose.pct_change(fill_method=None)
     holding_years = 2.0
     try:
         hy = (cfg.get('rules') or {}).get('candidate_holding_years', 2.0)
@@ -804,7 +1101,7 @@ def main():
             os.makedirs(REPORT_DIR, exist_ok=True)
             path = os.path.join(REPORT_DIR, 'ic_report_' + date.today().isoformat() + '.md')
             md = build_report(args, [a['code'] for a in aligned], D, results, rows_by_h, ts_by_h,
-                              skipped, weights, combined_icir)
+                              skipped, weights, combined_icir, aligned=aligned, bench_series=bench_ret_series)
             with io.open(path, 'w', encoding='utf-8') as f:
                 f.write(md)
             print('报告已写：' + path)

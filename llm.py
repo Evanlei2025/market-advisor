@@ -26,6 +26,7 @@ BLACKLIST_PATTERNS = [
     r"可以不执行|不执行也行|不操作也行|可以观望|选择观望|再等等|再看看|情况特殊|特殊时期",
 ]
 _NUM_RE = re.compile(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?")
+_SNAP_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 _ID_RE = re.compile(r"[A-Z]{2,}(?:-[A-Z0-9]+)+")
 
 
@@ -302,6 +303,7 @@ def gatekeeper_filter(ai_text, snapshot_data, valid_rule_ids):
     valid_ids = set(valid_rule_ids or [])
     snap = snapshot_data or ""
     sents = _split_sentences(ai_text)
+    snap_tokens = set(_SNAP_NUM_RE.findall(snap))
     audit = []
     removed = 0
     kept = []
@@ -313,7 +315,7 @@ def gatekeeper_filter(ai_text, snapshot_data, valid_rule_ids):
                 break
         if why is None:
             for num in _NUM_RE.findall(s):
-                if num not in snap:
+                if num not in snap_tokens:
                     why = f"数字审计:{num}"
                     break
         if why is None:
@@ -323,7 +325,7 @@ def gatekeeper_filter(ai_text, snapshot_data, valid_rule_ids):
                     break
         if why:
             removed += 1
-            audit.append(f"[拦截 {why}] {s[:60]}")
+            audit.append(f"[拦截 {why}] 原句: {s}")
             kept.append(BLOCKED_REPLACE)
         else:
             kept.append(s)

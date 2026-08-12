@@ -31,9 +31,9 @@ def run():
     check("1c 快照缺价格→数字审计拦截",
           out1c is None and any("数字审计:904.92" in a for a in aud1c), "aud=" + repr(aud1c))
 
-    # ---------- 场景2：基金代码+数字放行（数字审计为子串匹配） ----------
+    # ---------- 场景2：基金代码+数字放行（数字审计为 token 集合匹配） ----------
     text2 = "006195近1年收益20%"
-    out2, aud2 = gatekeeper_filter(text2, "006195 区间收益20%", [])
+    out2, aud2 = gatekeeper_filter(text2, "006195 近1年收益20%", [])
     check("2 基金代码+收益均在快照→放行", out2 == text2 and aud2 == [], "out=" + repr(out2))
 
     # ---------- 场景3：编造数字拦截 ----------
@@ -62,14 +62,14 @@ def run():
     # ---------- 场景6：规则 ID 白名单 ----------
     out6, aud6 = gatekeeper_filter("触发规则: TP-YIELD-1", "TP-YIELD-1 19.2", ["TP-YIELD-1"])
     check("6a 白名单内规则ID→放行", out6 == "触发规则: TP-YIELD-1" and aud6 == [], "out=" + repr(out6))
-    out6b, aud6b = gatekeeper_filter("触发规则: FAKE-RULE-9", "TP-YIELD-1 9.0%", ["TP-YIELD-1"])
+    out6b, aud6b = gatekeeper_filter("触发规则: FAKE-RULE-9", "TP-YIELD-1 9.0% 9月数据", ["TP-YIELD-1"])
     check("6b 白名单外规则ID→拦截",
           out6b is None and any("ID白名单" in a and "FAKE-RULE-9" in a for a in aud6b),
           "aud=" + repr(aud6b))
 
     # ---------- 场景7：方向倾向放行（V3，倾向词非黑名单，数字全在快照） ----------
     text7 = "当前环境倾向：防御，因 PMI 53.0 站上荣枯线但中证500 20日动量-6.9%"
-    snap7 = "PMI 53.0 中证500 2026-08-07 近5日趋势：沪深300累计下跌6.9%"
+    snap7 = "PMI 53.0 中证500 2026-08-07 近5日趋势：沪深300 20日累计下跌6.9%"
     out7, aud7 = gatekeeper_filter(text7, snap7, [])
     check("7 方向倾向句(数字逐字在快照)→放行", out7 == text7 and aud7 == [],
           "out=" + repr(out7) + " aud=" + repr(aud7))

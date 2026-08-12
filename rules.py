@@ -57,6 +57,25 @@ def ep_threshold(ctx):
     return 0.10
 
 
+def _pe_pctile_to_cap(pctile, mom):
+    """沪深300 PE分位→权益上限连续映射。
+    锚点: (0.80, 0.30), (0.90, 0.20), (0.95, 0.05) — 在断点处值=原档位值。
+    0.80档需mom<0双重确认。分段线性插值。"""
+    if pctile is None or pctile != pctile:
+        return None, None
+    if pctile >= 0.95:
+        return 0.05, "LAD-CSI300-95"
+    if pctile >= 0.90:
+        # [0.90, 0.95] 线性插值 0.20→0.05
+        t = (pctile - 0.90) / 0.05
+        return 0.20 + t * (0.05 - 0.20), "LAD-CSI300-90"
+    if pctile >= 0.80 and mom is not None and mom == mom and mom < 0:
+        # [0.80, 0.90] 线性插值 0.30→0.20
+        t = (pctile - 0.80) / 0.10
+        return 0.30 + t * (0.20 - 0.30), "LAD-CSI300-80"
+    return None, None
+
+
 def equity_target(cfg, ctx):
     """计算今日权益目标（最保守原则 + 股债性价比锁定 + 创业板估值信号）。
     返回 (target, triggers)；target 为区间基准值，由调用方套 target.band 形成区间。"""
@@ -70,14 +89,7 @@ def equity_target(cfg, ctx):
     p300 = ctx.get("csi300_pe_pctile")
     if p300 is not None:
         m300 = ctx.get("csi300_mom20") or 0.0
-        level = None
-        rid = None
-        if p300 >= 0.95:
-            level, rid = 0.05, "LAD-CSI300-95"
-        elif p300 >= 0.90:
-            level, rid = 0.20, "LAD-CSI300-90"
-        elif p300 >= 0.80 and m300 < 0:
-            level, rid = 0.30, "LAD-CSI300-80"
+        level, rid = _pe_pctile_to_cap(p300, m300)
         if level is not None:
             candidates.append(level)
             triggers.append(_trig(rid, f"沪深300 PE分位 {p300*100:.0f}%（动量{m300:+.1%}）→ 权益上限 {level*100:.0f}%"))
@@ -270,7 +282,7 @@ def compute_take_profit(cfg, pctx, ctx):
     F_sector = 1.0
     try:
         excess = ctx.get("excess_3m")   # 基金近3月收益 − 基准指数近3月收益（领先指标）
-        hhi = ctx.get("hhi")            # 行业集中度（0~1，前三大行业权重平方和）
+        hhi = ctx.get("hhi")            # 行业集中度（0~1，全行业权重平方和）
         if excess is not None and excess != excess:  # NaN
             excess = None
         if excess is not None:
@@ -349,6 +361,21 @@ def min_hold_days(cfg):
     return int(cfg.get("rules", {}).get("take_profit", {}).get("min_hold_days", 7))
 
 
+def _sigma_to_gap(sigma):
+    """波动率→止盈档距连续映射。
+    锚点: (0.15, [0.05,0.10]), (0.30, [0.07,0.14]), (0.40, [0.10,0.20])。
+    分段线性，锚点处值=原档位值。"""
+    if sigma is None or sigma != sigma or sigma < 0.15:
+        return [0.05, 0.10]
+    if sigma < 0.30:
+        t = (sigma - 0.15) / 0.15
+        return [0.05 + t * (0.07 - 0.05), 0.10 + t * (0.14 - 0.10)]
+    if sigma < 0.40:
+        t = (sigma - 0.30) / 0.10
+        return [0.07 + t * (0.10 - 0.07), 0.14 + t * (0.20 - 0.14)]
+    return [0.10, 0.20]
+
+
 def take_profit_signal(cfg, pctx, ctx):
     """止盈触发判定（V2.2）：返回 (action, detail, rule_id, trace) 或 (None, ...)（无信号）
     ctx: {"r_hold", "r_hold_prev", "hold_years", "sigma_ann", "bench_pctile",
@@ -376,20 +403,12 @@ def take_profit_signal(cfg, pctx, ctx):
     if fee is None or fee != fee:
         fee = 0.005
     margin = tp.get("fee_margin", 0.01)
-    # 止盈档间距（5.5b）：config 显式 tier_gap 优先（向后兼容）；否则按年化波动率动态分档
+    # 止盈档间距（5.5b）：config 显式 tier_gap 优先（向后兼容）；否则按年化波动率连续映射
     gap_cfg = tp.get("tier_gap")
     if isinstance(gap_cfg, list) and len(gap_cfg) >= 2:
         gap = list(gap_cfg)
     else:
-        s_sigma = st.get("sigma_ann")
-        if s_sigma is None or s_sigma != s_sigma:
-            gap = [0.05, 0.10]
-        elif s_sigma < 0.15:
-            gap = [0.05, 0.10]
-        elif s_sigma < 0.30:
-            gap = [0.07, 0.14]
-        else:
-            gap = [0.10, 0.20]
+        gap = _sigma_to_gap(st.get("sigma_ann"))
 
     # 门槛：≤1 年按持有年数折算（带 6% 地板）；>1 年按年化
     if hold_years <= 1.0:
@@ -1151,14 +1170,23 @@ def _tradability(pctx):
     return sum(parts) / len(parts)
 
 
+def _smooth_penalty(sub, threshold=0.3, floor=0.6):
+    """子分→连续惩罚系数。sub>=threshold→1.0，sub=0→floor，线性插值。"""
+    if sub is None or sub != sub:
+        return 1.0
+    if sub >= threshold:
+        return 1.0
+    if sub <= 0:
+        return floor
+    return floor + (1.0 - floor) * (sub / threshold)
+
+
 def _synthesize(weighted, tail_s, trad_s, completeness):
-    """合成：基础加权分（0-100）× 惩罚项 × 完整度折扣。
-    惩罚（及格线，仅尾部/可交易）：子分 <0.3 → ×0.6；完整度折扣 = 0.9 + 0.1×完整度。"""
+    """合成：基础加权分（0-100）× 连续惩罚项 × 完整度折扣。
+    惩罚（连续）：尾部/可交易子分 <0.3 → 连续衰减至 0.6；完整度折扣 = 0.9 + 0.1×完整度。"""
     s = float(weighted)
-    if tail_s is not None and tail_s == tail_s and tail_s < 0.3:
-        s *= 0.6
-    if trad_s is not None and trad_s == trad_s and trad_s < 0.3:
-        s *= 0.6
+    s *= _smooth_penalty(tail_s)
+    s *= _smooth_penalty(trad_s)
     s *= 0.9 + 0.1 * float(completeness)
     return s
 
@@ -1329,6 +1357,7 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
 
     # ---- 第一轮：止盈（撤/卖出）。影子模式下只记录信号，不生成指令 ----
     tp_actions = {}
+    sell_tracking = {}
     for p in products:
         code = p.get("code", "")
         tpc = (tp_ctx_map or {}).get(code) or {}
@@ -1366,6 +1395,7 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
                                 "reason": tpc.get("detail", "") + exempt_note,
                                 "rule_id": tpc.get("rid"),
                                 "trace": tpc.get("trace")}
+            sell_tracking[code] = sell_amt
             continue
         spec = settlement_of(cfg, p)
         confirm = add_trading_days(today, int(spec.get("redeem_confirm_days", 1)))
@@ -1379,6 +1409,18 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
         })
         cash_now += sell_amt
         remaining[code] = amt - sell_amt
+        sell_tracking[code] = sell_amt
+
+    # ---- 组合层面止盈风控检查 ----
+    summary_lines = []
+    total_sell = sum(sell_tracking.values())
+    if total_sell > 0 and total > 0:
+        sell_ratio = total_sell / total
+        if sell_ratio > 0.30:
+            summary_lines.append(
+                f"- ⚠️ 组合风控提示：单日止盈占组合 {sell_ratio*100:.0f}%，"
+                f"超 30% 警戒线，建议分批执行"
+            )
 
     # ---- 第二轮：目标仓位与关注池买入 ----
     equity_mv = sum(v for k, v in remaining.items()
@@ -1466,7 +1508,6 @@ def build_order_book(cfg, products, ctx, storm_active=False, storm_reasons=None,
                     cash_now -= amt
                     remaining[code] = remaining.get(code, 0) + amt
 
-    summary_lines = []
     for p in products:
         code = p.get("code", "")
         if remaining.get(code, 0) <= 0 and ctx.get("mvs", {}).get(code, 0) > 0:
@@ -1605,7 +1646,9 @@ def portfolio_diagnostics(cfg, ctx):
     nav = (1 + combo_ret).cumprod()
     max_dd = float((nav / nav.cummax() - 1).min())
     var95 = float(combo_ret.quantile(0.05))
-    out = {"vol": annual_vol, "max_dd": max_dd, "var95": var95,
+    tail = combo_ret[combo_ret <= var95]
+    cvar95 = float(tail.mean()) if len(tail) > 0 else var95
+    out = {"vol": annual_vol, "max_dd": max_dd, "var95": var95, "cvar95": cvar95,
            "excess_ann": None, "alpha": None, "beta": None, "ir": None}
 
     # ---- 5.1 基准对比：复合基准日收益（inner join 对齐、按权重求和） ----
@@ -1640,6 +1683,17 @@ def portfolio_diagnostics(cfg, ctx):
                         if varb == varb and varb > 0:
                             covpb = float(((pr - pr.mean()) * (bench_ret - bench_ret.mean())).mean())
                             out["beta"] = covpb / varb
+                        # OLS 回归修正 alpha/beta（Jensen's alpha）
+                        import numpy as np
+                        x = bench_ret.loc[bcommon].values
+                        y = pr.loc[bcommon].values
+                        x_mean, y_mean = x.mean(), y.mean()
+                        ss_xx = float(((x - x_mean) ** 2).sum())
+                        if ss_xx > 0:
+                            ols_beta = float(((x - x_mean) * (y - y_mean)).sum() / ss_xx)
+                            ols_alpha_daily = y_mean - ols_beta * x_mean
+                            out["alpha"] = float(ols_alpha_daily * 250.0)  # 年化 Jensen's alpha
+                            out["beta"] = ols_beta
                         if te == te and te > 0 and out["excess_ann"] is not None:
                             out["ir"] = out["excess_ann"] / te
     return out
@@ -1666,7 +1720,9 @@ def portfolio_simulator(ret_map, weights_after, total):
     nav = (1 + combo_ret).cumprod()
     max_dd = float((nav / nav.cummax() - 1).min())
     var95 = float(combo_ret.quantile(0.05))
-    return {"vol": annual_vol, "max_dd": max_dd, "var95": var95}
+    tail = combo_ret[combo_ret <= var95]
+    cvar95 = float(tail.mean()) if len(tail) > 0 else var95
+    return {"vol": annual_vol, "max_dd": max_dd, "var95": var95, "cvar95": cvar95}
 
 
 def validate_config(cfg):

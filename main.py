@@ -626,7 +626,7 @@ class DataFetcher:
         self._partner_info_cache[fund_code] = out
         return out
     def fund_industry_hhi(self, fund_code):
-        """行业集中度 HHI：基金行业配置（证监会大类）前三大权重平方和（归一化）。
+        """行业集中度 HHI：基金行业配置（证监会大类）全行业权重平方和（归一化）。
         返回 0~1；数据缺失/异常返回 None。"""
         try:
             df = self._ak(self.ak.fund_portfolio_industry_allocation_em, symbol=fund_code, date=str(datetime.now().year))
@@ -640,8 +640,7 @@ class DataFetcher:
             if total <= 0:
                 return None
             w = (w / total).sort_values(ascending=False)
-            top3 = w.head(3)
-            return float((top3 ** 2).sum())
+            return float((w ** 2).sum())
         except TimeoutError:
             raise
         except Exception:
@@ -2274,9 +2273,10 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
             L(f"- 年化波动率 {diag['vol']*100:.1f}%｜人话：一年里收益上蹿下跳的平均幅度")
             L(f"- 250日最大回撤 {diag['max_dd']*100:.1f}%｜人话：历史上从最高点最多跌过这么多")
             L(f"- 日度 VaR95 {diag['var95']*100:.2f}%（历史分位法）｜人话：按历史规律，一天最坏大概率不会亏超过这个数")
+            L(f"- CVaR95 {diag['cvar95']*100:.2f}%｜人话：超过VaR的极端情况下平均亏多少")
             if diag.get("alpha") is not None:
                 bench_names = " + ".join(f"{k}{v*100:.0f}%" for k, v in diag_data.get("bench_weights", {}).items())
-                L(f"- vs 基准（{bench_names}）：年化超额收益 {diag['excess_ann']*100:+.2f}%（alpha {diag['alpha']*100:+.2f}%，beta {diag['beta']:.2f}，信息比率 {diag['ir']:.2f}）｜人话：过去一年组合比基准多赚/少赚多少")
+                L(f"- vs 基准（{bench_names}）：年化超额收益 {diag['excess_ann']*100:+.2f}%（alpha(Jensen) {diag['alpha']*100:+.2f}%，beta {diag['beta']:.2f}，信息比率 {diag['ir']:.2f}）｜人话：超额收益为组合比基准多赚/少赚多少；alpha(Jensen) 为剔除系统性风险(beta)后的超额收益")
             else:
                 L(f"- 基准对比：数据不足，暂缺（需≥60个对齐交易日）")
             bl = _bench_compare_line(returns_map, weights_map, bench_ret_series, bench_weights)
@@ -2308,7 +2308,7 @@ def run_client(fetcher, cl, today, mkt_lines, mkt_ctx, bench_ret_series,
                     L(f"- 调仓后前瞻预览（历史数据模拟）：年化波动率 {sim['vol']*100:.1f}%（vs 当前 {diag['vol']*100:.1f}%），"
                       f"250日最大回撤 {sim['max_dd']*100:.1f}%（vs 当前 {diag['max_dd']*100:.1f}%）")
             ctx["diagnostics"] = (f"波动率 {diag['vol']*100:.1f}%，最大回撤 {diag['max_dd']*100:.1f}%，"
-                                  f"VaR95 {diag['var95']*100:.2f}%，实际权益暴露 {total_exp*100:.1f}%")
+                                  f"VaR95 {diag['var95']*100:.2f}%，CVaR95 {diag['cvar95']*100:.2f}%，实际权益暴露 {total_exp*100:.1f}%")
 
         # ---- 决策依据（规则 ID + 人话原理） ----
         L("")

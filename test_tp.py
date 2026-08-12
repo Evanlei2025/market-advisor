@@ -152,16 +152,16 @@ def run():
           and st_n["dd_ret"] >= st_n["dd_thr"],
           f"peak={st_n and st_n['peak_r_hold']:.3f} dd={st_n and st_n['dd_ret']:.3f} act={act}")
 
-    # O 高波动 tier_gap 动态化（5.5b）：σ_ann=0.35（无 config tier_gap）→ 档距 [0.10,0.20]，
+    # O 高波动 tier_gap 连续化（5.5b）：σ_ann=0.35（无 config tier_gap）→ 连续映射 gap=[0.085,0.170]，
     # lv1-lv2 间距 ≥ 0.07；若仍用固定档则此点位会错误触发次档
     st_o = rules.compute_take_profit(CFG_NO_GAP, base_pctx(), {**c0, "sigma_ann": 0.35, "r_hold": 0.30})
     lv1_o = max(st_o["T_eff"], 0.06) + fee + margin
-    lv2_o = max(st_o["T_eff"] + 0.10, 0.06) + fee + margin
+    lv2_o = max(st_o["T_eff"] + 0.085, 0.06) + fee + margin
     lv2_fix = max(st_o["T_eff"] + 0.05, 0.06) + fee + margin
     r_now_o = lv2_o - 0.005
     o = dict(c0, sigma_ann=0.35, r_hold=r_now_o, r_hold_prev=lv1_o - 0.05)
     act, detail, rid, tr = sig(o, cfg=CFG_NO_GAP)
-    check("O 高波动tier_gap动态增大",
+    check("O 高波动tier_gap连续增大",
           act == "tp_1of3" and (lv2_o - lv1_o) >= 0.07 and r_now_o >= lv2_fix,
           f"spacing={lv2_o - lv1_o:.4f} act={act}")
 

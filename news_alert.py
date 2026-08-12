@@ -138,14 +138,53 @@ def build_entity_table(fetcher, products, cfg, product_ctxs=None):
     return table
 
 
+def _generate_aliases(name):
+    """生成实体别名集合：全称 + 去括号简化 + 前N字（仅中文）。
+    3、4字前缀对≥3字名生成；2字前缀仅对≥4字名生成，避免
+    "中国平安"→"中国"误匹配"中国经济数据"等无关文本。
+    中文金融新闻常用简称/别称（如"宁德"代指"宁德时代"），
+    纯全称匹配会漏命中。最小前缀 2 字防止短名误匹配（"债"不会匹配所有债券名）。
+    """
+    if not name:
+        return set()
+    aliases = {name}
+    # 去括号（中英文括号均处理）
+    base = re.sub(r'[（(].*?[)）]', '', name).strip()
+    if base and base != name:
+        aliases.add(base)
+    # 提取纯中文部分，生成前缀别名。
+    # 3、4字前缀：对≥3字名生成（3字前缀已足够具体，不易误匹配）。
+    # 2字前缀：仅对≥4字名生成，避免"中国平安"→"中国"误命中"中国经济数据"等无关文本。
+    cn = re.sub(r'[^\u4e00-\u9fa5]', '', base)
+    if len(cn) >= 3:
+        for n in (3, 4):
+            if len(cn) > n:
+                aliases.add(cn[:n])
+    if len(cn) >= 4:
+        aliases.add(cn[:2])
+    return aliases
+
+
 def match_entities(news_text, table):
-    """返回命中的实体清单 [{kind, name}]，无命中返回 []"""
+    """在新闻文本中匹配实体（含别名）。命中后记录原始全称（非别名），
+    保持下游 stock_meta 查找一致。无命中返回 []。
+    """
     hits = []
-    for kind, names in (("stock", table["stocks"]), ("bond", table["bonds"]),
-                        ("industry", table["industries"]), ("macro", table["macro_kw"])):
+    for kind, names in (("stock", table.get("stocks", set())),
+                        ("bond", table.get("bonds", set())),
+                        ("industry", table.get("industries", set())),
+                        ("macro", table.get("macro_kw", set()))):
         for name in names:
-            if name and name.lower() in news_text.lower():
-                hits.append({"kind": kind, "name": name})
+            if not name:
+                continue
+            matched = False
+            for alias in _generate_aliases(name):
+                if alias and alias.lower() in news_text.lower():
+                    hits.append({"kind": kind, "name": name})  # 记录原始全称
+                    matched = True
+                    break
+            if matched:
+                continue
     return hits
 
 

@@ -138,9 +138,9 @@ def test_equity_target(check):
     # G1.4 p300=0.80 动量<0 -> target 0.30 + LAD-CSI300-80
     t, tr = rules.equity_target(CFG, {'csi300_pe_pctile': 0.80, 'csi300_mom20': -0.01})
     check('G1 300分位80%动量<0 -> 30%', t == 0.30 and 'LAD-CSI300-80' in ids_of(tr), 't=%s' % t)
-    # G1.5 p300=0.85 (区间内) 动量<0 -> 命中 >=0.80 档 0.30
+    # G1.5 p300=0.85 (区间内) 动量<0 -> 连续插值 0.25（0.30→0.20 中点）
     t, tr = rules.equity_target(CFG, {'csi300_pe_pctile': 0.85, 'csi300_mom20': -0.02})
-    check('G1 300分位85%动量<0 -> 30%', t == 0.30 and 'LAD-CSI300-80' in ids_of(tr), 't=%s' % t)
+    check('G1 300分位85%动量<0 -> 25%', approx(t, 0.25) and 'LAD-CSI300-80' in ids_of(tr), 't=%s' % t)
     # G1.6 中证500: p500>=0.75 且 m500<-5% -> target 0.05 + LAD-CSI500-75
     t, tr = rules.equity_target(CFG, {'csi500_pe_pctile': 0.75, 'csi500_mom20': -0.06})
     check('G1 500分位75%动量-6% -> 5%', t == 0.05 and 'LAD-CSI500-75' in ids_of(tr), 't=%s' % t)
@@ -257,9 +257,9 @@ def test_score_candidate(check):
     rules._clear_candidate_pool()
     check('G3 边际贡献相关性与top10', m_same < m_diff and approx(m_same, 0.0) and approx(m_diff, 1.0),
           'same=%s diff=%s' % (m_same, m_diff))
-    # G3.12 惩罚项：尾部风险<0.3 → ×0.6；可交易<0.3 → ×0.6；完整度折扣 0.9+0.1×完整度
-    check('G3 惩罚项与折扣', approx(rules._synthesize(50.0, 0.2, 0.8, 1.0), 30.0)
-          and approx(rules._synthesize(50.0, 0.5, 0.2, 1.0), 30.0)
+    # G3.12 连续惩罚项：sub=0.2 → penalty=0.6+0.4×(0.2/0.3)=0.8667；完整度折扣 0.9+0.1×完整度
+    check('G3 惩罚项与折扣', approx(rules._synthesize(50.0, 0.2, 0.8, 1.0), 43.33)
+          and approx(rules._synthesize(50.0, 0.5, 0.2, 1.0), 43.33)
           and approx(rules._synthesize(50.0, 0.5, 0.8, 1.0), 50.0)
           and approx(rules._synthesize(50.0, 0.5, 0.5, 0.8), 49.0))
     # G3.13 完整度门槛：可用权重 <80% → None（仅 max_dd 一个维度 = 15/100）
@@ -342,8 +342,8 @@ def test_portfolio_diagnostics(check):
                   'bench_returns': {'CSI300': ret_series(120, 0.015)},
                   'bench_weights': {'CSI300': 1.0}}
     out = rules.portfolio_diagnostics(CFG, bench_full)
-    check('G4 正常组合键完整', out is not None and set(out.keys()) ==
-          {'vol', 'max_dd', 'var95', 'excess_ann', 'alpha', 'beta', 'ir'}, 'out=%s' % out)
+    check('G4 正常组合键完整', out is not None and set(out.keys()) >=
+          {'vol', 'max_dd', 'var95', 'cvar95', 'excess_ann', 'alpha', 'beta', 'ir'}, 'out=%s' % out)
     check('G4 vol/max_dd/var95合理', out is not None and 0.01 < out['vol'] < 0.35
           and out['max_dd'] < 0 and out['var95'] < 0,
           'vol=%s dd=%s var95=%s' % (out and out['vol'], out and out['max_dd'], out and out['var95']))
@@ -352,6 +352,8 @@ def test_portfolio_diagnostics(check):
           and out['ir'] is not None,
           'ex=%s a=%s b=%s ir=%s' % (out and out['excess_ann'], out and out['alpha'],
                                      out and out['beta'], out and out['ir']))
+    check('G4 cvar95合理', out is not None and out['cvar95'] <= out['var95'],
+          'var95=%s cvar95=%s' % (out.get('var95'), out.get('cvar95')))
     # G4.2 样本不足（<30天）-> None
     r29 = {'A': ret_series(29, 0.02)}
     check('G4 样本<30 -> None',
