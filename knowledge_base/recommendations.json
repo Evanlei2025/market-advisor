@@ -95,5 +95,12 @@
     "type": "industry",
     "reason": "近5日累计上涨4.9%，动量较强，但估值分位82%偏高。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-12",
+    "name": "创业板指",
+    "type": "industry",
+    "reason": "PE分位32%合理，估值相对低，且今日逆势上涨0.34%。",
+    "client": "Evan_Lei"
   }
 ]

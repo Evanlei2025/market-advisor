@@ -257,5 +257,58 @@
     "storm_active": false,
     "eq_target": null,
     "client": "QunHui_Xue"
+  },
+  {
+    "date": "2026-08-12",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Echo_Wang"
+  },
+  {
+    "date": "2026-08-12",
+    "orders": [],
+    "target_alloc": {
+      "equity": 0.2766304347826087,
+      "bond": 0.6233695652173913,
+      "cash": 0.1
+    },
+    "pending_cash": [],
+    "total_mv": 2499.261015,
+    "tp_signals": [
+      {
+        "code": "006195",
+        "action": "tp_dd"
+      }
+    ],
+    "storm_active": false,
+    "eq_target": 0.2766304347826087,
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-12",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Harley_Lei"
+  },
+  {
+    "date": "2026-08-12",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "QunHui_Xue"
   }
 ]
