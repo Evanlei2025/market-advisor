@@ -116,5 +116,12 @@
     "type": "industry",
     "reason": "PE分位33%合理，近5日上涨1.9%，相对低估。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-14",
+    "name": "创业板指",
+    "type": "industry",
+    "reason": "PE分位34%合理，近5日累计上涨1.8%，动能偏强。",
+    "client": "Evan_Lei"
   }
 ]
