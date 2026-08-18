@@ -130,5 +130,12 @@
     "type": "industry",
     "reason": "PE分位34%合理，近5日累计+5.7%，动能较强。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-18",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "PE分位92%偏高，但今日逆势上涨1.19%，防御属性受青睐。",
+    "client": "Evan_Lei"
   }
 ]
