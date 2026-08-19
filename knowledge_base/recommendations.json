@@ -137,5 +137,12 @@
     "type": "industry",
     "reason": "PE分位92%偏高，但今日逆势上涨1.19%，防御属性受青睐。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-19",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "上证红利 PE 8.72，近10年分位 95%，但近5日累计上涨2.1%，防御属性强。",
+    "client": "Evan_Lei"
   }
 ]
