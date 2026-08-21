@@ -151,5 +151,19 @@
     "type": "industry",
     "reason": "PE分位97%偏高，但近5日累计+3.4%，防御属性强。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-21",
+    "name": "创业板指",
+    "type": "industry",
+    "reason": "PE分位30%低估，估值有吸引力。",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-21",
+    "name": "黄金",
+    "type": "industry",
+    "reason": "Au99.99趋势多头，避险需求支撑。",
+    "client": "Evan_Lei"
   }
 ]
