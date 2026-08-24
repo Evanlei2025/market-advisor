@@ -165,5 +165,12 @@
     "type": "industry",
     "reason": "Au99.99趋势多头，避险需求支撑。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-24",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "上证红利PE 8.84，近10年分位97%偏高，但近5日累计+4.1%，防御属性凸显。",
+    "client": "Evan_Lei"
   }
 ]
