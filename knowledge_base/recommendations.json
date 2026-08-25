@@ -172,5 +172,12 @@
     "type": "industry",
     "reason": "上证红利PE 8.84，近10年分位97%偏高，但近5日累计+4.1%，防御属性凸显。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-25",
+    "name": "制造业",
+    "type": "industry",
+    "reason": "PMI 53.0 站上荣枯线，制造业扩张，周期方向偏暖。",
+    "client": "Evan_Lei"
   }
 ]
