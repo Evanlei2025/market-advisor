@@ -1,32 +1,5 @@
 [
   {
-    "date": "2026-08-06",
-    "orders": [],
-    "target_alloc": {
-      "equity": 0.05,
-      "bond": 0.85,
-      "cash": 0.1
-    },
-    "pending_cash": [
-      {
-        "code": "006195",
-        "side": "赎回",
-        "shares": 116.78,
-        "apply_date": "2026-08-05",
-        "confirm_date": "2026-08-06",
-        "settle_date": "2026-08-10",
-        "note": "用户自行操作，占原持仓1/3"
-      }
-    ],
-    "total_mv": 2471.67276,
-    "tp_signals": [
-      {
-        "code": "006195",
-        "action": "tp_dd"
-      }
-    ]
-  },
-  {
     "date": "2026-08-07",
     "orders": [],
     "target_alloc": {},
@@ -750,6 +723,54 @@
   },
   {
     "date": "2026-08-25",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "QunHui_Xue"
+  },
+  {
+    "date": "2026-08-26",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Echo_Wang"
+  },
+  {
+    "date": "2026-08-26",
+    "orders": [],
+    "target_alloc": {
+      "equity": 0.4,
+      "bond": 0.5,
+      "cash": 0.1
+    },
+    "pending_cash": [],
+    "total_mv": 872.24454,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": 0.4,
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-26",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Harley_Lei"
+  },
+  {
+    "date": "2026-08-26",
     "orders": [],
     "target_alloc": {},
     "pending_cash": [],
