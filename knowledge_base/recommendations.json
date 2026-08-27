@@ -179,5 +179,19 @@
     "type": "industry",
     "reason": "PMI 53.0 站上荣枯线，制造业扩张，周期方向偏暖。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-27",
+    "name": "中证500",
+    "type": "industry",
+    "reason": "今日涨2.26%，近5日累计上涨，动量偏强。",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-27",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "近5日累计上涨2.1%，防御属性突出。",
+    "client": "Evan_Lei"
   }
 ]
