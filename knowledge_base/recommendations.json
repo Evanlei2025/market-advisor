@@ -193,5 +193,19 @@
     "type": "industry",
     "reason": "近5日累计上涨2.1%，防御属性突出。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-28",
+    "name": "红利资产",
+    "type": "industry",
+    "reason": "上证红利今日+0.15%，近5日累计+2.2%，防御属性凸显。",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-28",
+    "name": "制造业",
+    "type": "industry",
+    "reason": "PMI 53.0 站上荣枯线，制造业扩张，周期方向偏暖。",
+    "client": "Evan_Lei"
   }
 ]
