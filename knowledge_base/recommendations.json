@@ -207,5 +207,19 @@
     "type": "industry",
     "reason": "PMI 53.0 站上荣枯线，制造业扩张，周期方向偏暖。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-31",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "PE分位98%偏高，但股息率优势，可关注防御属性。",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-08-31",
+    "name": "中证500",
+    "type": "industry",
+    "reason": "PE分位78%偏高，但PMI 53.0扩张，中小盘或有弹性。",
+    "client": "Evan_Lei"
   }
 ]
