@@ -221,5 +221,12 @@
     "type": "industry",
     "reason": "PE分位78%偏高，但PMI 53.0扩张，中小盘或有弹性。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-01",
+    "name": "制造业",
+    "type": "industry",
+    "reason": "PMI 53.0站上荣枯线，制造业扩张。",
+    "client": "Evan_Lei"
   }
 ]
