@@ -1,74 +1,5 @@
 [
   {
-    "date": "2026-08-12",
-    "orders": [],
-    "target_alloc": {},
-    "pending_cash": [],
-    "total_mv": 0.0,
-    "tp_signals": [],
-    "storm_active": false,
-    "eq_target": null,
-    "client": "Echo_Wang"
-  },
-  {
-    "date": "2026-08-12",
-    "orders": [],
-    "target_alloc": {
-      "equity": 0.2788901823826155,
-      "bond": 0.6211098176173845,
-      "cash": 0.1
-    },
-    "pending_cash": [
-      {
-        "code": "006195",
-        "side": "赎回",
-        "shares": 233.55,
-        "amount": 758.22,
-        "apply_date": "2026-08-10",
-        "confirm_date": "2026-08-11",
-        "settle_date": "2026-08-13",
-        "note": "用户赎回全部份额（确认净值3.2465，手续费0）"
-      },
-      {
-        "code": "014846",
-        "side": "赎回",
-        "shares": 703.65,
-        "amount": 874.36,
-        "apply_date": "2026-08-10",
-        "confirm_date": "2026-08-11",
-        "settle_date": "2026-08-13",
-        "note": "用户赎回部分份额，FIFO扣减最早批次（确认净值1.2426，手续费0）"
-      }
-    ],
-    "total_mv": 873.22965,
-    "tp_signals": [],
-    "storm_active": false,
-    "eq_target": 0.2788901823826155,
-    "client": "Evan_Lei"
-  },
-  {
-    "date": "2026-08-12",
-    "orders": [],
-    "target_alloc": {},
-    "pending_cash": [],
-    "total_mv": 0.0,
-    "tp_signals": [],
-    "storm_active": false,
-    "eq_target": null,
-    "client": "Harley_Lei"
-  },
-  {
-    "date": "2026-08-12",
-    "orders": [],
-    "target_alloc": {},
-    "pending_cash": [],
-    "total_mv": 0.0,
-    "tp_signals": [],
-    "storm_active": false,
-    "eq_target": null,
-    "client": "QunHui_Xue"
-  },
-  {
     "date": "2026-08-13",
     "orders": [],
     "target_alloc": {},
@@ -731,6 +662,54 @@
   },
   {
     "date": "2026-09-01",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "QunHui_Xue"
+  },
+  {
+    "date": "2026-09-02",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Echo_Wang"
+  },
+  {
+    "date": "2026-09-02",
+    "orders": [],
+    "target_alloc": {
+      "equity": 0.4,
+      "bond": 0.5,
+      "cash": 0.1
+    },
+    "pending_cash": [],
+    "total_mv": 871.4001599999999,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": 0.4,
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-02",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Harley_Lei"
+  },
+  {
+    "date": "2026-09-02",
     "orders": [],
     "target_alloc": {},
     "pending_cash": [],
