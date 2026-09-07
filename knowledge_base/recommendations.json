@@ -249,5 +249,12 @@
     "type": "industry",
     "reason": "PMI 53.0 站上荣枯线，制造业扩张，周期方向偏暖。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-07",
+    "name": "创业板指",
+    "type": "industry",
+    "reason": "PE分位28%低估，近10年低位，具备安全边际。",
+    "client": "Evan_Lei"
   }
 ]
