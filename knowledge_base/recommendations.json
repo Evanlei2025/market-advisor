@@ -256,5 +256,12 @@
     "type": "industry",
     "reason": "PE分位28%低估，近10年低位，具备安全边际。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-08",
+    "name": "上证红利",
+    "type": "industry",
+    "reason": "上证红利今日+1.59%，防御属性凸显，估值无数据但股息优势。",
+    "client": "Evan_Lei"
   }
 ]
