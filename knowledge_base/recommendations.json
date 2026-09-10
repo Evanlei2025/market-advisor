@@ -263,5 +263,19 @@
     "type": "industry",
     "reason": "上证红利今日+1.59%，防御属性凸显，估值无数据但股息优势。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-10",
+    "name": "红利风格",
+    "type": "industry",
+    "reason": "上证红利近5日累计上涨1.2%，弱市中防御属性凸显",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-10",
+    "name": "债券型产品",
+    "type": "industry",
+    "reason": "10年国债收益率1.68%处历史4%低位，利率环境偏松",
+    "client": "Evan_Lei"
   }
 ]
