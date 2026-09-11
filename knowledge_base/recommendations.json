@@ -277,5 +277,19 @@
     "type": "industry",
     "reason": "10年国债收益率1.68%处历史4%低位，利率环境偏松",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-11",
+    "name": "债券型基金（关注池）",
+    "type": "industry",
+    "reason": "10年国债1.69%处4%分位低位，组合固收目标50%需配置。",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-11",
+    "name": "量化权益（006195）",
+    "type": "industry",
+    "reason": "规则指令再平衡买入348元，权益暴露15.1%低于目标40%。",
+    "client": "Evan_Lei"
   }
 ]

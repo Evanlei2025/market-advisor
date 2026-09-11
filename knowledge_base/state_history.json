@@ -1,53 +1,5 @@
 [
   {
-    "date": "2026-08-21",
-    "orders": [],
-    "target_alloc": {},
-    "pending_cash": [],
-    "total_mv": 0.0,
-    "tp_signals": [],
-    "storm_active": false,
-    "eq_target": null,
-    "client": "Echo_Wang"
-  },
-  {
-    "date": "2026-08-21",
-    "orders": [],
-    "target_alloc": {
-      "equity": 0.2993805652342238,
-      "bond": 0.6006194347657762,
-      "cash": 0.1
-    },
-    "pending_cash": [],
-    "total_mv": 872.314905,
-    "tp_signals": [],
-    "storm_active": false,
-    "eq_target": 0.2993805652342238,
-    "client": "Evan_Lei"
-  },
-  {
-    "date": "2026-08-21",
-    "orders": [],
-    "target_alloc": {},
-    "pending_cash": [],
-    "total_mv": 0.0,
-    "tp_signals": [],
-    "storm_active": false,
-    "eq_target": null,
-    "client": "Harley_Lei"
-  },
-  {
-    "date": "2026-08-21",
-    "orders": [],
-    "target_alloc": {},
-    "pending_cash": [],
-    "total_mv": 0.0,
-    "tp_signals": [],
-    "storm_active": false,
-    "eq_target": null,
-    "client": "QunHui_Xue"
-  },
-  {
     "date": "2026-08-24",
     "orders": [],
     "target_alloc": {},
@@ -706,6 +658,60 @@
   },
   {
     "date": "2026-09-10",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "QunHui_Xue"
+  },
+  {
+    "date": "2026-09-11",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Echo_Wang"
+  },
+  {
+    "date": "2026-09-11",
+    "orders": [
+      {
+        "side": "买入",
+        "code": "006195",
+        "amount": 348.39
+      }
+    ],
+    "target_alloc": {
+      "equity": 0.4,
+      "bond": 0.5,
+      "cash": 0.1
+    },
+    "pending_cash": [],
+    "total_mv": 870.97797,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": 0.4,
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-11",
+    "orders": [],
+    "target_alloc": {},
+    "pending_cash": [],
+    "total_mv": 0.0,
+    "tp_signals": [],
+    "storm_active": false,
+    "eq_target": null,
+    "client": "Harley_Lei"
+  },
+  {
+    "date": "2026-09-11",
     "orders": [],
     "target_alloc": {},
     "pending_cash": [],
