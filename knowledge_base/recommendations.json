@@ -291,5 +291,19 @@
     "type": "industry",
     "reason": "规则指令再平衡买入348元，权益暴露15.1%低于目标40%。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-14",
+    "name": "红利风格",
+    "type": "industry",
+    "reason": "上证红利近5日累计上涨0.4%，弱市中抗跌属性显现。",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-14",
+    "name": "创业板成长",
+    "type": "industry",
+    "reason": "创业板指PE分位24%低估，但近5日跌3.3%，等待企稳。",
+    "client": "Evan_Lei"
   }
 ]
