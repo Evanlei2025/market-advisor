@@ -305,5 +305,19 @@
     "type": "industry",
     "reason": "创业板指PE分位24%低估，但近5日跌3.3%，等待企稳。",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-17",
+    "name": "权益类（再平衡补仓方向）",
+    "type": "industry",
+    "reason": "股债性价比分位57%，盈利收益率7.92%高于10年国债1.69%",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-17",
+    "name": "债券类（组合压舱）",
+    "type": "industry",
+    "reason": "10年国债收益率1.69%、分位4%，利率处低位",
+    "client": "Evan_Lei"
   }
 ]
