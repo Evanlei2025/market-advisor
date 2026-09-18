@@ -319,5 +319,19 @@
     "type": "industry",
     "reason": "10年国债收益率1.69%、分位4%，利率处低位",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-18",
+    "name": "债券型基金",
+    "type": "industry",
+    "reason": "10年国债1.68%分位4%，组合固收目标50%，债券作战略配置",
+    "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-18",
+    "name": "红利风格",
+    "type": "industry",
+    "reason": "上证红利跌0.39%，估值分位数据缺失，风格回调后可关注",
+    "client": "Evan_Lei"
   }
 ]
