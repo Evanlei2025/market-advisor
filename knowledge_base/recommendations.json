@@ -333,5 +333,12 @@
     "type": "industry",
     "reason": "上证红利跌0.39%，估值分位数据缺失，风格回调后可关注",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-21",
+    "name": "创业板指",
+    "type": "industry",
+    "reason": "PE分位27%低估，近5日累计上涨3.5%，估值与动能匹配",
+    "client": "Evan_Lei"
   }
 ]
