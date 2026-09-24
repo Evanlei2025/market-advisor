@@ -340,5 +340,12 @@
     "type": "industry",
     "reason": "PE分位27%低估，近5日累计上涨3.5%，估值与动能匹配",
     "client": "Evan_Lei"
+  },
+  {
+    "date": "2026-09-24",
+    "name": "红利风格",
+    "type": "industry",
+    "reason": "上证红利今日+0.04%，在普跌中抗跌，PMI 53.0 扩张期防御属性显现",
+    "client": "Evan_Lei"
   }
 ]
