@@ -2,7 +2,7 @@
 """执行回执记录工具（V3 执行回执反馈机制的手动录入入口）。
 用法：
   python record_feedback.py <client> <date> <status> [note]
-  python record_feedback.py Evan_Lei 2026-08-10 已执行 "003504 部分卖出"
+    python record_feedback.py <client> 2026-08-10 已执行 "执行备注"
 status 取值：已执行 / 部分 / 未执行（可传任意描述，仅做记录展示）。
 记录写入 state.json 的 feedback 数组，报告「执行回执」板块显示最近一条。
 """

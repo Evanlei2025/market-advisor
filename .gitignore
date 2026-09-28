@@ -6,3 +6,6 @@ reports/
 __pycache__/
 *.pyc
 state.json
+!public_data/state.json
+delivery.json
+public_site/

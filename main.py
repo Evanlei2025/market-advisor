@@ -2599,4 +2599,5 @@ def push_wecom(webhook, title, content):
 
 
 if __name__ == "__main__":
-    main()
+    import public_runner
+    public_runner.main()

@@ -1,0 +1,35 @@
+name: public-service-heartbeat
+
+on:
+  schedule:
+    # Every day 22:17 China time, after the daily publication window.
+    - cron: '17 14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Verify report state and notify external monitor
+        env:
+          PUBLIC_HEARTBEAT_URL: ${{ secrets.PUBLIC_HEARTBEAT_URL }}
+        run: python public_health.py
+      - name: Notify operator on failure
+        if: failure()
+        env:
+          SC_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: |
+          if [ -n "$SC_KEY" ]; then
+            curl --fail --silent --show-error --max-time 15 -X POST "https://sctapi.ftqq.com/${SC_KEY}.send" \
+              --data-urlencode "title=市场简报巡检失败" \
+              --data-urlencode "desp=请检查最近公开快照、周报及 GitHub Actions。" > /dev/null
+          fi
