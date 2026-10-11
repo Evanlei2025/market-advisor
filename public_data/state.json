@@ -922,33 +922,10 @@
       "published_asof": "2026-10-11"
     }
   ],
-  "pending": {
-    "weekly:2026-W41": {
-      "body": "市场机会与风险周报 2026-W41｜截至2026-10-09\n较上期：尚无可比较的已发布观察，从本期开始建立记录。\n宽基：沪深300近5日-2.8%、中证500近5日-4.9%、上证红利近5日+2.3%、创业板指近5日-7.5%、中证全债近5日+0.1%\n行业关注：房地产、美容护理、医药生物\n判断边界：行业研究筛选不等于确定买点；详见证据与反证。",
-      "url": "https://Evanlei2025.github.io/market-advisor/weeks/2026-W41.html",
-      "recipients": {
-        "receiver-910b91d4c03fff13": {
-          "status": "accepted",
-          "attempt": "38127604802-1-receiver-910b91d4c03fff13-weekly:2026-W41"
-        },
-        "receiver-896f3dbf4580dc6d": {
-          "status": "accepted",
-          "attempt": "38127604802-1-receiver-896f3dbf4580dc6d-weekly:2026-W41"
-        },
-        "receiver-af9293b53b85e45f": {
-          "status": "accepted",
-          "attempt": "38127604802-1-receiver-af9293b53b85e45f-weekly:2026-W41"
-        },
-        "receiver-7485e3ea9180ded9": {
-          "status": "unknown",
-          "attempt": "38127604802-1-receiver-7485e3ea9180ded9-weekly:2026-W41"
-        }
-      },
-      "kind": "weekly",
-      "page_version": "c6d55005c977894111c3ad6c43fabf38378c525b92db0b640b7e02109e0b6180"
-    }
+  "pending": {},
+  "delivered": {
+    "weekly:2026-W41": "2026-10-11T17:16:24.863948+08:00"
   },
-  "delivered": {},
   "alerts": [],
   "legacy_deployed": {},
   "deployed_pages": {
