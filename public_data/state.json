@@ -938,6 +938,10 @@
         "receiver-af9293b53b85e45f": {
           "status": "accepted",
           "attempt": "38127604802-1-receiver-af9293b53b85e45f-weekly:2026-W41"
+        },
+        "receiver-7485e3ea9180ded9": {
+          "status": "reserved",
+          "attempt": "38127604802-1-receiver-7485e3ea9180ded9-weekly:2026-W41"
         }
       },
       "kind": "weekly",
