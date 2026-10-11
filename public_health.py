@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -13,31 +13,53 @@ import public_runner
 import public_store
 
 
-def assert_current(state, today, expected):
+TZ = ZoneInfo("Asia/Shanghai")
+WEEKLY_SCHEDULE = time(17, 35)
+WEEKLY_GRACE = timedelta(hours=2)
+
+
+def due_week(now):
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        raise ValueError("timezone-aware heartbeat datetime required")
+    now = now.astimezone(TZ)
+    saturday = now.date() - timedelta(days=(now.weekday() - 5) % 7)
+    deadline = datetime.combine(saturday, WEEKLY_SCHEDULE, TZ) + WEEKLY_GRACE
+    if now < deadline:
+        saturday -= timedelta(days=7)
+    return public_brief.week_id(saturday.isoformat())
+
+
+def assert_current(state, now, expected):
     if not state["snapshots"] or state["snapshots"][-1]["asof"] != expected:
         raise ValueError(f"missing market snapshot for {expected}")
-    # Allow the new weekly edition until the following week's first publication window.
-    if today.weekday() >= 5:
-        wk = public_brief.week_id(today.isoformat())
-        if wk not in state["weeks"]:
-            raise ValueError("missing weekly edition " + wk)
-    latest_week = max(state["weeks"], default=None)
-    if latest_week and (not state["week_asof"].get(latest_week)
-                        or state["deployed"].get(latest_week) != state["week_asof"][latest_week]):
-        raise ValueError("latest weekly edition was not deployed")
-    if any(item.get("kind") == "weekly" and item.get("recipients") for item in state["pending"].values()):
-        raise ValueError("weekly delivery incomplete")
+    wk = due_week(now)
+    if wk not in state["weeks"]:
+        raise ValueError("missing weekly edition " + wk)
+    for edition in {wk, max(state["weeks"])}:
+        event_id = "weekly:" + edition
+        prepared = state["prepared_pages"].get(event_id)
+        if (not state["week_asof"].get(edition)
+                or state["deployed"].get(edition) != state["week_asof"][edition]
+                or not prepared
+                or state["deployed_pages"].get(event_id, {}).get("page_version") != prepared):
+            raise ValueError("weekly edition was not deployed at prepared version: " + edition)
+    if state["pending"]:
+        unresolved = [event_id for event_id, event in state["pending"].items()
+                      if any(item.get("status") == "unknown" for item in event["recipients"].values())]
+        if unresolved:
+            raise ValueError("delivery status unknown: " + ", ".join(unresolved))
+        raise ValueError("delivery incomplete: " + ", ".join(state["pending"]))
 
 
 def main():
     url = os.environ.get("PUBLIC_HEARTBEAT_URL", "")
     if not url.startswith("https://"):
         raise ValueError("PUBLIC_HEARTBEAT_URL missing or invalid")
-    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    from main import DataFetcher
+    now = datetime.now(TZ)
+    from public_sources import DataFetcher
     fetcher = DataFetcher()
-    expected = public_market.expected_session(today, fetcher, fetcher.ak)
-    assert_current(public_store.load(public_runner.STATE), today, expected)
+    expected = public_market.expected_session(now.date(), fetcher)
+    assert_current(public_store.load(public_runner.STATE), now, expected)
     response = requests.get(url, timeout=15)
     response.raise_for_status()
 

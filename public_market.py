@@ -18,20 +18,20 @@ ASSETS = {
 BENCHMARK = "沪深300"
 
 
-def expected_session(today, fetcher, ak):
-    """Most recent exchange session, falling back to weekdays only if unavailable."""
+def expected_session(today, fetcher, ak=None):
+    """Return the latest verified exchange session; never infer holidays."""
     try:
-        calendar = fetcher._ak(ak.tool_trade_date_hist_sina, timeout=20)
-        dates = pd.to_datetime(calendar["trade_date"], errors="coerce").dt.date
+        calendar = (fetcher.trade_calendar() if hasattr(fetcher, "trade_calendar")
+                    else fetcher._ak(ak.tool_trade_date_hist_sina, timeout=20))
+        if calendar is None or "trade_date" not in calendar:
+            raise ValueError("missing trade calendar")
+        dates = pd.to_datetime(calendar["trade_date"], errors="coerce").dt.date.dropna()
         available = dates[(dates <= today) & (dates >= today - timedelta(days=20))]
         if not available.empty:
             return max(available).isoformat()
-    except Exception:
-        pass
-    day = today
-    while day.weekday() >= 5:
-        day -= timedelta(days=1)
-    return day.isoformat()
+    except Exception as exc:
+        raise ValueError("verified trading calendar unavailable") from exc
+    raise ValueError("verified trading calendar has no recent session")
 
 
 def session_age(observed, today):
@@ -89,10 +89,8 @@ def collect(today=None, fetcher=None, ak=None):
     """Collect a snapshot from a shared classification; no holdings or model calls."""
     today = today or datetime.now(TZ).date()
     if fetcher is None:
-        from main import DataFetcher
+        from public_sources import DataFetcher
         fetcher = DataFetcher()
-    if ak is None:
-        ak = fetcher.ak
     expected = expected_session(today, fetcher, ak)
     market_day = date.fromisoformat(expected)
     snapshot = {"schema": 1, "date": today.isoformat(), "assets": {}, "sectors": {},
@@ -118,7 +116,8 @@ def collect(today=None, fetcher=None, ak=None):
 
     # Index membership is discovered from the same SW level-1 classification.
     try:
-        universe = fetcher._ak(ak.index_realtime_sw, symbol="一级行业", timeout=35)
+        universe = (fetcher.industry_universe() if hasattr(fetcher, "industry_universe")
+                    else fetcher._ak(ak.index_realtime_sw, symbol="一级行业", timeout=35))
         if universe is None or not {"指数代码", "指数名称"}.issubset(universe.columns):
             raise ValueError("missing SW industry universe")
         universe = universe[["指数代码", "指数名称"]].dropna().drop_duplicates("指数代码")
@@ -132,7 +131,8 @@ def collect(today=None, fetcher=None, ak=None):
     for row in universe.itertuples(index=False, name=None):
         code, name = str(row[0]), str(row[1])
         try:
-            hist = fetcher._ak(ak.index_hist_sw, symbol=code.split(".")[0], period="day", timeout=22)
+            hist = (fetcher.industry_history(code) if hasattr(fetcher, "industry_history")
+                    else fetcher._ak(ak.index_hist_sw, symbol=code.split(".")[0], period="day", timeout=22))
             item = series_metrics(hist, market_day, "日期", "收盘")
             if item["date"] != snapshot["asof"]:
                 raise ValueError("sector and benchmark observation dates differ")
@@ -146,8 +146,9 @@ def collect(today=None, fetcher=None, ak=None):
     try:
         # Daily analysis shares the SW classification and supplies PE/PB for that date.
         day = snapshot["asof"].replace("-", "")
-        table = fetcher._ak(ak.index_analysis_daily_sw, symbol="一级行业",
-                            start_date=day, end_date=day, timeout=30)
+        table = (fetcher.industry_analysis(day) if hasattr(fetcher, "industry_analysis")
+                 else fetcher._ak(ak.index_analysis_daily_sw, symbol="一级行业",
+                                  start_date=day, end_date=day, timeout=30))
         for _, row in table.iterrows():
             name = str(row.get("指数名称", ""))
             item = snapshot["sectors"].get(name)
@@ -173,7 +174,8 @@ def collect(today=None, fetcher=None, ak=None):
     except Exception:
         snapshot["quality"].append("十年国债收益率不可用")
     try:
-        cash = fetcher._ak(ak.rate_interbank, indicator="3月", timeout=25)
+        cash = (fetcher.shibor() if hasattr(fetcher, "shibor")
+                else fetcher._ak(ak.rate_interbank, indicator="3月", timeout=25))
         cash = cash.sort_values("报告日").dropna(subset=["报告日", "利率"])
         row = cash.iloc[-1]
         cd = str(row["报告日"])[:10]
@@ -185,7 +187,8 @@ def collect(today=None, fetcher=None, ak=None):
     except Exception:
         snapshot["quality"].append("3月期Shibor不可用；现金参考利率暂缺")
     try:
-        gold = fetcher._ak(ak.spot_hist_sge, symbol="Au99.99", timeout=25)
+        gold = (fetcher.gold_daily() if hasattr(fetcher, "gold_daily")
+                else fetcher._ak(ak.spot_hist_sge, symbol="Au99.99", timeout=25))
         snapshot["gold"] = series_metrics(gold, market_day)
         snapshot["gold"]["proxy"] = "Au99.99现货"
     except Exception:
@@ -206,17 +209,45 @@ def collect(today=None, fetcher=None, ak=None):
             snapshot["quality"].append(f"{name}统计期不可用")
     try:
         stories = fetcher.cls_news()
-        if stories is not None and not stories.empty:
+        if stories is None:
+            snapshot["quality"].append("新闻来源未返回数据；不推断涨跌原因")
+        elif stories.empty:
+            snapshot["news"] = []
+            snapshot["quality"].append("新闻来源本次无新闻")
+        elif not {"标题", "发布时间"}.issubset(stories.columns):
+            snapshot["quality"].append("新闻发布时间或标题字段缺失，已排除")
+        else:
             candidates = []
+            invalid_times = 0
             for _, story in stories.iterrows():
-                published = pd.to_datetime(story["发布时间"], errors="coerce")
-                if pd.isna(published) or not (market_day - timedelta(days=7) <= published.date() <= today):
+                value = story["发布时间"]
+                # A clock without a source date must never acquire today's date.
+                if not isinstance(value, (datetime, pd.Timestamp, str)):
+                    invalid_times += 1
+                    continue
+                if isinstance(value, str) and not value[:4].isdigit():
+                    invalid_times += 1
+                    continue
+                try:
+                    published = pd.Timestamp(value)
+                    if pd.isna(published):
+                        raise ValueError("missing publication time")
+                    published = (published.tz_localize(TZ) if published.tzinfo is None
+                                 else published.tz_convert(TZ))
+                except (ValueError, TypeError):
+                    invalid_times += 1
+                    continue
+                if not (market_day - timedelta(days=7) <= published.date() <= today):
                     continue
                 title = str(story["标题"]).strip().replace("\n", " ")
                 if len(title) < 8 or len(title) > 100:
                     continue
                 candidates.append({"published": published.isoformat(), "title": title, "source": "财联社"})
             snapshot["news"] = sorted(candidates, key=lambda item: item["published"], reverse=True)[:3]
+            if invalid_times:
+                snapshot["quality"].append(f"新闻发布时间解析失败{invalid_times}/{len(stories)}条，已排除")
+    except ValueError:
+        snapshot["quality"].append("新闻来源日期/时间字段缺失或格式无效，已排除")
     except Exception:
         snapshot["quality"].append("新闻接口不可用；不推断涨跌原因")
     return snapshot

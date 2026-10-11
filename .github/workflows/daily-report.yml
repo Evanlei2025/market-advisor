@@ -33,8 +33,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
+      - run: python -m pip check
+      - run: python -m compileall -q .
       - name: Offline verification
-        run: python -m unittest -q test_public.py test_clients.py
+        run: python -m unittest -q test_public.py
       - name: Validate delivery and monitoring before cutover
         env:
           ADVISOR_DELIVERY_JSON: ${{ secrets.ADVISOR_CONFIG }}
@@ -48,6 +50,7 @@ jobs:
       - name: Build public research
         env:
           FORCE_WEEKLY: ${{ inputs.publish_weekly }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           if [ "$FORCE_WEEKLY" = 'true' ]; then
             python public_runner.py prepare --weekly
@@ -68,10 +71,15 @@ jobs:
         with:
           path: public_site
       - name: Deploy public pages
+        id: pages
         uses: actions/deploy-pages@v4
+      - name: Verify public Pages content before notifications
+        run: python public_runner.py verify-live
       - name: Record verified Pages deployment
+        env:
+          PAGES_DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          python public_runner.py deployed
+          python public_runner.py deployed --deployment-id "$PAGES_DEPLOYMENT_ID"
           git add public_data/state.json
           if ! git diff --cached --quiet; then
             git commit -m "public: record deployment"
@@ -81,20 +89,22 @@ jobs:
         env:
           ADVISOR_DELIVERY_JSON: ${{ secrets.ADVISOR_CONFIG }}
         run: |
-          set -e
-          for alias in $(python public_runner.py recipients); do
-            for event in $(python public_runner.py events --recipient "$alias"); do
-              attempt="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${alias}"
+          set -euo pipefail
+          aliases="$(python public_runner.py recipients)"
+          while IFS= read -r alias; do
+            if [ -z "$alias" ]; then
+              continue
+            fi
+            events="$(python public_runner.py events --recipient "$alias")"
+            while IFS= read -r event; do
+              if [ -z "$event" ]; then
+                continue
+              fi
+              attempt="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${alias}-${event}"
               python public_runner.py reserve --recipient "$alias" --attempt "$attempt" --event "$event"
-              git add public_data/state.json
-              git commit -m "public: reserve notification"
-              git push origin HEAD:master
               python public_runner.py notify --recipient "$alias" --attempt "$attempt" --event "$event"
-              git add public_data/state.json
-              git commit -m "public: record delivery result"
-              git push origin HEAD:master
-            done
-          done
+            done <<< "$events"
+          done <<< "$aliases"
       - name: Notify operator on failure
         if: failure()
         env:

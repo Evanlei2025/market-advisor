@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - 'public_*.py'
+      - 'aktime.py'
       - 'test_public.py'
       - 'requirements.txt'
       - '.github/workflows/**'
@@ -22,4 +23,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: python -m unittest -q test_public.py test_clients.py
+      - run: python -m pip check
+      - run: python -m compileall -q .
+      - run: python -m unittest -q test_public.py

@@ -5,14 +5,17 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
+from time import sleep
 from zoneinfo import ZoneInfo
 
 import requests
 
 import public_brief
 import public_market
+import public_sources
 import public_store
 
 ROOT = Path(__file__).resolve().parent
@@ -72,12 +75,20 @@ def prepare(store, research, weekly_due=False):
             store["pending"][key] = {"body": text, "url": URL + "alerts/" + asof + ".html",
                                      "recipients": {}, "kind": "alert"}
             store["alerts"].append({"asof": asof, "body": text, "events": events})
-            store["alerts"] = store["alerts"][-20:]
+            recent = store["alerts"][-20:]
+            retained_ids = set(store["pending"])
+            retained = [entry for entry in store["alerts"]
+                        if "alert:" + entry["asof"] in retained_ids]
+            retained_dates = {entry["asof"] for entry in retained}
+            store["alerts"] = retained + [entry for entry in recent
+                                           if entry["asof"] not in retained_dates]
         # Set the reference price on the first observation after publication.
         for entry in store["observations"]:
+            if not entry.get("published_at"):
+                continue
             current = research["sectors"].get(entry["entity"])
             if (current and "reference_close" not in entry and
-                    current["data"]["date"] > entry["asof"]):
+                    current["data"]["date"] > entry["published_asof"]):
                 entry["reference_close"] = current["data"]["close"]
                 entry["reference_date"] = current["data"]["date"]
                 entry["reference_benchmark"] = research["assets"][public_market.BENCHMARK]["close"]
@@ -88,7 +99,7 @@ def prepare(store, research, weekly_due=False):
                 entry.setdefault("path", []).append({
                     "date": current["data"]["date"], "close": current["data"]["close"],
                     "benchmark": research["assets"][public_market.BENCHMARK]["close"]})
-                entry["path"] = entry["path"][:60]
+                entry["path"] = entry["path"][:61]
     if weekly_due:
         wk = public_brief.week_id(research["date"])
         if wk not in store["weeks"]:
@@ -104,10 +115,24 @@ def prepare(store, research, weekly_due=False):
                                                  "recipients": {}, "kind": "weekly"}
             for name, item in public_brief.highlighted(research):
                 store["observations"].append({"entity": name, "asof": item["data"]["date"],
-                                               "week": wk})
+                                               "week": wk, "published_at": None,
+                                               "deployment_id": None})
             store["observations"] = store["observations"][-150:]
-            store["weeks"] = dict(sorted(store["weeks"].items())[-104:])
+            keep_weeks = set(event_id[7:] for event_id in store["pending"]
+                             if event_id.startswith("weekly:"))
+            ordered_weeks = sorted(store["weeks"])
+            keep_weeks.update(ordered_weeks[-104:])
+            store["weeks"] = {key: store["weeks"][key] for key in sorted(keep_weeks)}
             store["week_asof"] = {k: store["week_asof"][k] for k in store["weeks"]}
+    store["site_version"] = public_brief.site_version(store["weeks"], store["alerts"])
+    page_versions = public_brief.page_versions(store["weeks"], store["alerts"])
+    store["prepared_pages"] = page_versions
+    store["deployed"] = {k: v for k, v in store["deployed"].items() if k in store["weeks"]}
+    store["deployed_pages"] = {k: v for k, v in store["deployed_pages"].items() if k in page_versions}
+    for event_id, event in store["pending"].items():
+        if event_id not in page_versions:
+            raise ValueError("pending event has no public page")
+        event["page_version"] = page_versions[event_id]
     return store
 
 
@@ -122,22 +147,22 @@ def brief_message(research, previous, wk):
     return "\n".join(lines)
 
 
-def prepare_run(state_path=STATE, output=SITE, today=None, weekly_due=None, collector=None):
+def prepare_run(state_path=STATE, output=SITE, today=None, weekly_due=None, collector=None, fetcher=None):
     today = today or datetime.now(TZ).date()
     state = public_store.load(state_path)
     weekly_due = (today.weekday() == 5 or not state["weeks"]) if weekly_due is None else weekly_due
     # A Saturday digest uses the most recent complete daily observation.
+    if fetcher is None and (collector is None or (weekly_due and today.weekday() >= 5 and state["snapshots"])):
+        fetcher = public_sources.DataFetcher()
     if weekly_due and today.weekday() >= 5 and state["snapshots"]:
         latest = state["snapshots"][-1]
-        from main import DataFetcher
-        fetcher = DataFetcher()
-        expected = public_market.expected_session(today, fetcher, fetcher.ak)
+        expected = public_market.expected_session(today, fetcher)
         if latest["asof"] == expected:
             research = dict(latest, date=today.isoformat())
         else:
             raise ValueError(f"周报快照截至{latest['asof']}，最近交易日应为{expected}")
     else:
-        raw = (collector or public_market.collect)(today=today)
+        raw = (collector or public_market.collect)(today=today, fetcher=fetcher)
         research = public_market.research(raw)
     if weekly_due and public_brief.week_id(research["date"]) not in state["weeks"]:
         import public_ai
@@ -145,9 +170,7 @@ def prepare_run(state_path=STATE, output=SITE, today=None, weekly_due=None, coll
     if weekly_due and today.weekday() >= 5 and research["asof"] == today.isoformat():
         raise ValueError("weekly edition cannot use a weekend market date")
     if collector is None:
-        from main import DataFetcher
-        fetcher = DataFetcher()
-        expected = public_market.expected_session(today, fetcher, fetcher.ak)
+        expected = public_market.expected_session(today, fetcher)
         if research["asof"] != expected:
             raise ValueError(f"行情日期{research['asof']}未对齐最近交易日{expected}")
     updated = prepare(state, research, weekly_due)
@@ -218,13 +241,83 @@ def _delivery_recipients(delivery_json):
     return recipients_from_config(json.loads(source))
 
 
-def mark_deployed(state_path=STATE, persist=public_store.save):
+def verify_live_run(state_path=STATE, output=SITE, transport=requests.get, attempts=6,
+                    wait=sleep):
+    """Verify the public manifest and every page before recording deployment."""
+    state = public_store.load(state_path)
+    manifest = public_brief.validate_manifest(output)
+    if not state["weeks"] or manifest["pages"] != state["prepared_pages"]:
+        raise ValueError("public site manifest differs from prepared state")
+    if not isinstance(attempts, int) or attempts < 1:
+        raise ValueError("positive verification attempts required")
+
+    def fetch(name):
+        response = transport(URL + name, params={"v": manifest["site_id"]},
+                             headers={"Cache-Control": "no-cache"}, timeout=(5, 15))
+        response.raise_for_status()
+        return response
+
+    for attempt in range(attempts):
+        try:
+            if fetch("manifest.json").json() != manifest:
+                raise ValueError("public manifest differs from deployed artifact")
+            for name, digest in sorted(manifest["files"].items()):
+                if hashlib.sha256(fetch(name).content).hexdigest() != digest:
+                    raise ValueError("public page content differs: " + name)
+            # Confirm the manifest still identifies the same publication after fetching pages.
+            if fetch("manifest.json").json() != manifest:
+                raise ValueError("public manifest changed during verification")
+            return manifest["site_id"]
+        except (requests.RequestException, ValueError) as exc:
+            error = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+            if attempt + 1 < attempts:
+                wait(10)
+    raise RuntimeError("public Pages verification failed: " + error) from None
+
+
+def mark_deployed(state_path=STATE, persist=public_store.save, output=SITE, deployment_id=None,
+                  published_at=None):
     state = public_store.load(state_path)
     if not state["weeks"]:
         raise ValueError("no weekly edition to mark deployed")
-    wk = max(state["weeks"])
-    state["deployed"][wk] = state["week_asof"][wk]
+    manifest = public_brief.validate_manifest(output)
+    expected = state["prepared_pages"]
+    if "weekly:" + max(state["weeks"]) not in expected:
+        raise ValueError("weekly page has not been prepared")
+    if manifest["pages"] != expected:
+        raise ValueError("deployed site manifest differs from prepared state")
+    if not deployment_id:
+        raise ValueError("verified Pages deployment id required")
+    published_at = published_at or datetime.now(TZ).isoformat()
+    latest_asof = state["snapshots"][-1]["asof"] if state["snapshots"] else state["week_asof"][max(state["weeks"])]
+    # If deployment was delayed, observations must start after its actual date.
+    boundary = max(latest_asof, datetime.fromisoformat(published_at).astimezone(TZ).date().isoformat())
+    for event_id, version in expected.items():
+        record = state["deployed_pages"].get(event_id)
+        if record is None or record["page_version"] != version:
+            state["deployed_pages"][event_id] = {"page_version": version,
+                "deployment_id": str(deployment_id), "published_at": published_at}
+        if event_id.startswith("weekly:"):
+            wk = event_id[7:]
+            state["deployed"][wk] = state["week_asof"][wk]
+            record = state["deployed_pages"][event_id]
+            for entry in state["observations"]:
+                if entry["week"] == wk and not entry.get("published_at"):
+                    entry.update(published_at=record["published_at"],
+                                 deployment_id=record["deployment_id"], published_asof=boundary)
     persist(state_path, state)
+
+
+def require_deployed(state, event_id, event):
+    record = state["deployed_pages"].get(event_id)
+    version = state["prepared_pages"].get(event_id)
+    if (not version or version != event.get("page_version")
+            or not record or record.get("page_version") != version):
+        raise ValueError("event page is not deployed at the pending version")
+    if event["kind"] == "weekly":
+        wk = event_id[7:]
+        if state["deployed"].get(wk) != state["week_asof"].get(wk):
+            raise ValueError("weekly edition is not deployed")
 
 
 def eligible_events(alias, state_path=STATE, delivery_json=None):
@@ -232,8 +325,12 @@ def eligible_events(alias, state_path=STATE, delivery_json=None):
     if alias not in recipients:
         raise ValueError("invalid recipient alias")
     state = public_store.load(state_path)
-    return [event_id for event_id, event in state["pending"].items()
-            if alias not in event["recipients"]]
+    out = []
+    for event_id, event in state["pending"].items():
+        require_deployed(state, event_id, event)
+        if alias not in event["recipients"]:
+            out.append(event_id)
+    return out
 
 
 def reserve_run(alias, attempt, event_id, state_path=STATE, delivery_json=None, persist=public_store.save):
@@ -242,12 +339,15 @@ def reserve_run(alias, attempt, event_id, state_path=STATE, delivery_json=None, 
     if alias not in recipients or not attempt or event_id not in state["pending"]:
         raise ValueError("invalid delivery attempt")
     event = state["pending"][event_id]
+    require_deployed(state, event_id, event)
     if alias in event["recipients"]:
         raise ValueError("delivery already reserved")
+    if attempt in event.get("retired_attempts", {}).get(alias, []):
+        raise ValueError("retry requires a new attempt")
     content = event["body"] + "\n" + event["url"]
     if len(content.encode("utf-8")) > 3500:
         raise ValueError("public push exceeds byte limit")
-    event["recipients"][alias] = {"status": "unknown", "attempt": attempt}
+    event["recipients"][alias] = {"status": "reserved", "attempt": attempt}
     persist(state_path, state)
 
 
@@ -258,9 +358,15 @@ def notify_run(alias, attempt, event_id, state_path=STATE, delivery_json=None, s
     if alias not in recipients or not attempt or event_id not in state["pending"]:
         raise ValueError("invalid delivery attempt")
     event = state["pending"][event_id]
-    if event["recipients"].get(alias) != {"status": "unknown", "attempt": attempt}:
+    require_deployed(state, event_id, event)
+    if event["recipients"].get(alias) != {"status": "reserved", "attempt": attempt}:
         raise ValueError("no reserved delivery for this attempt")
     content = event["body"] + "\n" + event["url"]
+    if len(content.encode("utf-8")) > 3500:
+        raise ValueError("public push exceeds byte limit")
+    # Consume the reservation durably before contacting the provider.
+    event["recipients"][alias] = {"status": "unknown", "attempt": attempt}
+    persist(state_path, state)
     try:
         sender(recipients[alias], "市场周报" if event["kind"] == "weekly" else "市场变化", content)
     except Exception:
@@ -283,9 +389,13 @@ def reconcile_run(alias, event_id, status, state_path=STATE, delivery_json=None,
     if status not in ("accepted", "retry"):
         raise ValueError("status must be accepted or retry")
     event = state["pending"][event_id]
+    record = event["recipients"].get(alias)
+    if not record or record["status"] == "accepted":
+        raise ValueError("no unresolved delivery to reconcile")
     if status == "accepted":
-        event["recipients"][alias] = {"status": "accepted", "reconciled": True}
+        event["recipients"][alias] = dict(record, status="accepted", reconciled=True)
     else:
+        event.setdefault("retired_attempts", {}).setdefault(alias, []).append(record["attempt"])
         event["recipients"].pop(alias, None)
     if status == "accepted" and all(event["recipients"].get(name, {}).get("status") == "accepted" for name in recipients):
         state["delivered"][event_id] = datetime.now(TZ).isoformat()
@@ -294,20 +404,40 @@ def reconcile_run(alias, event_id, status, state_path=STATE, delivery_json=None,
     persist(state_path, state)
 
 
+def persist_ledger(state_path, state, run=subprocess.run):
+    """The CLI requires a successful remote ledger push before any send."""
+    relative = Path(state_path).resolve().relative_to(ROOT).as_posix()
+    public_store.save(state_path, state)
+
+    def git(*args, allowed=(0,)):
+        result = run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+        if result.returncode not in allowed:
+            raise RuntimeError("public delivery ledger Git operation failed: " + args[0])
+        return result.returncode
+
+    git("add", "--", relative)
+    if git("diff", "--cached", "--quiet", "--", relative, allowed=(0, 1)) == 1:
+        git("commit", "--only", "-m", "public: persist notification ledger", "--", relative)
+    git("push", "origin", "HEAD:master")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", nargs="?", default="prepare",
-                        choices=["prepare", "deployed", "recipients", "events", "reserve", "notify", "reconcile"])
+                        choices=["prepare", "verify-live", "deployed", "recipients", "events", "reserve", "notify", "reconcile"])
     parser.add_argument("--weekly", action="store_true", help="Publish an edition outside the Saturday schedule")
     parser.add_argument("--recipient")
     parser.add_argument("--attempt")
     parser.add_argument("--event")
     parser.add_argument("--status")
+    parser.add_argument("--deployment-id")
     args = parser.parse_args()
     if args.phase == "prepare":
         prepare_run(weekly_due=True if args.weekly else None)
+    elif args.phase == "verify-live":
+        print("Verified public Pages site " + verify_live_run())
     elif args.phase == "deployed":
-        mark_deployed()
+        mark_deployed(deployment_id=args.deployment_id)
     elif args.phase == "recipients":
         for alias in _delivery_recipients(None):
             print(alias)
@@ -315,11 +445,11 @@ def main():
         for event_id in eligible_events(args.recipient):
             print(event_id)
     elif args.phase == "reserve":
-        reserve_run(args.recipient, args.attempt, args.event)
+        reserve_run(args.recipient, args.attempt, args.event, persist=persist_ledger)
     elif args.phase == "reconcile":
-        reconcile_run(args.recipient, args.event, args.status)
+        reconcile_run(args.recipient, args.event, args.status, persist=persist_ledger)
     else:
-        notify_run(args.recipient, args.attempt, args.event)
+        notify_run(args.recipient, args.attempt, args.event, persist=persist_ledger)
 
 
 if __name__ == "__main__":

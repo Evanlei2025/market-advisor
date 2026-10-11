@@ -1,7 +1,13 @@
 """Build public market briefs and an allowlisted static site."""
 from __future__ import annotations
 
+import hashlib
 import html
+import json
+import re
+import shutil
+import tempfile
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -68,7 +74,7 @@ def recap(research, previous, observations):
             if prev and prev.get("date") != curr["date"] and prev.get("close", 0) > 0:
                 diff = (curr["close"] / prev["close"] - 1) * 100
                 lines.append(f"{name}较上次观察({_signed(diff)})，数据从{prev['date']}至{curr['date']}")
-    for entry in observations[-3:]:
+    for entry in [item for item in observations if item.get("published_at")][-3:]:
         name = entry["entity"]
         current = research["sectors"].get(name)
         path = entry.get("path", [])
@@ -149,35 +155,133 @@ def html_page(title, body, links=()):
             f'{paragraphs}</main></html>')
 
 
+def valid_week(wk):
+    if not isinstance(wk, str) or not re.fullmatch(r"\d{4}-W\d{2}", wk):
+        raise ValueError("invalid week identifier")
+    try:
+        date.fromisocalendar(int(wk[:4]), int(wk[-2:]), 1)
+    except ValueError as exc:
+        raise ValueError("invalid week identifier") from exc
+    return wk
+
+
+def publication_pages(weeks, alerts=()):
+    pages = {}
+    for wk, text in weeks.items():
+        valid_week(wk)
+        pages["weekly:" + wk] = ("weeks/" + wk + ".html",
+            html_page("周报 " + wk, text, [("全部周报", "../index.html")]))
+    for entry in alerts:
+        asof = entry["asof"]
+        if date.fromisoformat(asof).isoformat() != asof:
+            raise ValueError("invalid alert date")
+        event_id = "alert:" + asof
+        if event_id in pages:
+            raise ValueError("duplicate alert page")
+        pages[event_id] = ("alerts/" + asof + ".html",
+            html_page("市场变化 " + asof, entry["body"], [("最新周报", "../latest.html")]))
+    return pages
+
+
+def site_version(weeks, alerts=()):
+    identity = page_versions(weeks, alerts)
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def page_versions(weeks, alerts=()):
+    return {event_id: hashlib.sha256(body.encode("utf-8")).hexdigest()
+            for event_id, (_, body) in sorted(publication_pages(weeks, alerts).items())}
+
+
+def validate_manifest(output):
+    output = Path(output).resolve()
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    if (manifest.get("schema") != 1 or not isinstance(manifest.get("files"), dict)
+            or not isinstance(manifest.get("pages"), dict)):
+        raise ValueError("invalid site manifest")
+    actual = {str(path.relative_to(output)).replace("\\", "/")
+              for path in output.rglob("*") if path.is_file() and path.name != "manifest.json"}
+    if actual != set(manifest["files"]):
+        raise ValueError("site manifest file set differs")
+    for name, digest in manifest["files"].items():
+        path = (output / name).resolve()
+        if not path.is_relative_to(output) or path.is_symlink():
+            raise ValueError("invalid site manifest path")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError("site manifest content differs")
+    for event_id, digest in manifest["pages"].items():
+        if event_id.startswith("weekly:"):
+            path = "weeks/" + valid_week(event_id[7:]) + ".html"
+        elif event_id.startswith("alert:"):
+            day = event_id[6:]
+            if date.fromisoformat(day).isoformat() != day:
+                raise ValueError("invalid manifest alert date")
+            path = "alerts/" + day + ".html"
+        else:
+            raise ValueError("invalid manifest page id")
+        if manifest["files"].get(path) != digest:
+            raise ValueError("site manifest page content differs")
+    identity = hashlib.sha256(json.dumps(
+        {"files": manifest["files"], "pages": manifest["pages"]},
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if identity != manifest.get("site_id"):
+        raise ValueError("site manifest identity differs")
+    return manifest
+
+
 def render_site(output, weeks, alerts=()):
+    """Build a complete site in a temporary directory and replace the old one."""
     output = Path(output)
-    output.mkdir(parents=True, exist_ok=True)
-    archive = output / "weeks"
-    archive.mkdir(exist_ok=True)
-    links = []
-    for wk, text in sorted(weeks.items(), reverse=True):
-        if not wk.replace("-W", "").isdigit():
-            raise ValueError("invalid week identifier")
-        (archive / (wk + ".html")).write_text(
-            html_page("周报 " + wk, text, [("全部周报", "../index.html")]), encoding="utf-8")
-        links.append(("周报 " + wk, "weeks/" + wk + ".html"))
-    newest = max(weeks) if weeks else None
-    alert_link = bool(alerts)
-    if newest:
-        (output / "latest.html").write_text(
-            html_page("最新市场周报", weeks[newest], [("全部周报", "index.html")]), encoding="utf-8")
-    if alerts:
-        alert_dir = output / "alerts"
-        alert_dir.mkdir(exist_ok=True)
-        for entry in alerts:
-            asof = entry["asof"]
-            date.fromisoformat(asof)
-            (alert_dir / (asof + ".html")).write_text(
-                html_page("市场变化 " + asof, entry["body"], [("最新周报", "../latest.html")]),
-                encoding="utf-8")
-        (output / "alert.html").write_text(
-            html_page("近期市场变化", alerts[-1]["body"], [("最新周报", "latest.html")]), encoding="utf-8")
-    (output / "index.html").write_text(
-        html_page("市场机会与风险", "公开市场周报档案。" if weeks else "首期周报尚未发布。",
-                  ([("最新周报", "latest.html")] if newest else [])
-                  + ([("近期变化", "alert.html")] if alert_link else []) + links), encoding="utf-8")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp = Path(tempfile.mkdtemp(prefix="." + output.name + "-", dir=str(output.parent)))
+    try:
+        pages = publication_pages(weeks, alerts)
+        links = [("周报 " + wk, "weeks/" + wk + ".html")
+                 for wk in sorted(weeks, reverse=True)]
+        newest = max(weeks) if weeks else None
+        for path, body in pages.values():
+            target = temp / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body, encoding="utf-8", newline="\n")
+        if newest:
+            (temp / "latest.html").write_text(
+                html_page("最新市场周报", weeks[newest], [("全部周报", "index.html")]), encoding="utf-8", newline="\n")
+        if alerts:
+            (temp / "alert.html").write_text(
+                html_page("近期市场变化", alerts[-1]["body"], [("最新周报", "latest.html")]), encoding="utf-8", newline="\n")
+        (temp / "index.html").write_text(
+            html_page("市场机会与风险", "公开市场周报档案。" if weeks else "首期周报尚未发布。",
+                      ([("最新周报", "latest.html")] if newest else [])
+                      + ([("近期变化", "alert.html")] if alerts else []) + links), encoding="utf-8", newline="\n")
+        files = {str(path.relative_to(temp)).replace("\\", "/"): hashlib.sha256(path.read_bytes()).hexdigest()
+                 for path in temp.rglob("*") if path.is_file()}
+        page_hashes = {event_id: hashlib.sha256(body.encode("utf-8")).hexdigest()
+                       for event_id, (_, body) in sorted(pages.items())}
+        manifest = {"schema": 1, "pages": page_hashes, "files": files}
+        manifest["site_id"] = hashlib.sha256(json.dumps(
+            {"files": files, "pages": page_hashes}, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        (temp / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False,
+                                                        indent=2) + "\n", encoding="utf-8")
+        validate_manifest(temp)
+        output = output.resolve()
+        if output.is_symlink() or output == output.parent:
+            raise ValueError("unsafe site output path")
+        backup = output.with_name("." + output.name + "-previous-" + uuid.uuid4().hex)
+        had_output = output.exists()
+        if had_output:
+            if not output.is_dir():
+                raise ValueError("site output is not a directory")
+            output.replace(backup)
+        try:
+            temp.replace(output)
+        except Exception:
+            if had_output:
+                backup.replace(output)
+            raise
+        if had_output:
+            shutil.rmtree(backup)
+        return site_version(weeks, alerts)
+    except Exception:
+        shutil.rmtree(temp, ignore_errors=True)
+        raise
