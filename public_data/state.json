@@ -936,7 +936,7 @@
           "attempt": "38127604802-1-receiver-896f3dbf4580dc6d-weekly:2026-W41"
         },
         "receiver-af9293b53b85e45f": {
-          "status": "reserved",
+          "status": "unknown",
           "attempt": "38127604802-1-receiver-af9293b53b85e45f-weekly:2026-W41"
         }
       },
