@@ -893,28 +893,33 @@
   "week_asof": {
     "2026-W41": "2026-10-09"
   },
-  "deployed": {},
+  "deployed": {
+    "2026-W41": "2026-10-09"
+  },
   "observations": [
     {
       "entity": "房地产",
       "asof": "2026-10-09",
       "week": "2026-W41",
-      "published_at": null,
-      "deployment_id": null
+      "published_at": "2026-10-11T17:15:57.637098+08:00",
+      "deployment_id": "38127604802-1",
+      "published_asof": "2026-10-11"
     },
     {
       "entity": "美容护理",
       "asof": "2026-10-09",
       "week": "2026-W41",
-      "published_at": null,
-      "deployment_id": null
+      "published_at": "2026-10-11T17:15:57.637098+08:00",
+      "deployment_id": "38127604802-1",
+      "published_asof": "2026-10-11"
     },
     {
       "entity": "医药生物",
       "asof": "2026-10-09",
       "week": "2026-W41",
-      "published_at": null,
-      "deployment_id": null
+      "published_at": "2026-10-11T17:15:57.637098+08:00",
+      "deployment_id": "38127604802-1",
+      "published_asof": "2026-10-11"
     }
   ],
   "pending": {
@@ -929,7 +934,13 @@
   "delivered": {},
   "alerts": [],
   "legacy_deployed": {},
-  "deployed_pages": {},
+  "deployed_pages": {
+    "weekly:2026-W41": {
+      "page_version": "c6d55005c977894111c3ad6c43fabf38378c525b92db0b640b7e02109e0b6180",
+      "deployment_id": "38127604802-1",
+      "published_at": "2026-10-11T17:15:57.637098+08:00"
+    }
+  },
   "prepared_pages": {
     "weekly:2026-W41": "c6d55005c977894111c3ad6c43fabf38378c525b92db0b640b7e02109e0b6180"
   },
