@@ -932,7 +932,7 @@
           "attempt": "38127604802-1-receiver-910b91d4c03fff13-weekly:2026-W41"
         },
         "receiver-896f3dbf4580dc6d": {
-          "status": "reserved",
+          "status": "unknown",
           "attempt": "38127604802-1-receiver-896f3dbf4580dc6d-weekly:2026-W41"
         }
       },
