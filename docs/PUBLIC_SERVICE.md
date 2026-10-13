@@ -14,13 +14,13 @@
 - `ADVISOR_CONFIG`：只用于公共简报收件渠道，格式参考 `public_delivery.example.json`。短期仍能在内存中兼容旧的完整配置 Secret 以完成迁移，但不会读取或写入其中的持仓数据；迁移完成后应替换为公共收件 JSON。
 - `DEEPSEEK_API_KEY`：可选。仅用于周报编辑解读；没有它仍生成确定性周报。
 - `PUBLIC_HEARTBEAT_URL`：无人值守上线前必须设置，由外部心跳服务提供；缺失时发布工作流直接失败。
-- `SERVERCHAN_KEY`：仅工作流失败时通知维护者，可与收件渠道不同。
+- `SERVERCHAN_KEY`：工作流失败或调度延迟超宽限时通知维护者，可与收件渠道不同。
 
 不要把任何 SendKey、Webhook 或 API key 写进仓库、问题单或聊天记录。
 
 ## 外部心跳
 
-一次性在 https://healthchecks.io/ 创建免费 Check：Period 1 day、Grace 1 day，开启邮件提醒；将 Ping URL 设为 `PUBLIC_HEARTBEAT_URL`。`public-service-heartbeat` 工作流每天北京时间 22:17 检查市场快照和周报（休市日与最近交易日对齐），然后才给外部服务发送心跳。工作流从未启动时，外部服务会提醒；内容仍需参考 Actions 与 Pages。
+一次性在 https://healthchecks.io/ 创建免费 Check：Period 1 day、Grace 1 day，开启邮件提醒；将 Ping URL 设为 `PUBLIC_HEARTBEAT_URL`。`public-service-heartbeat` 工作流每天北京时间 22:17 检查市场快照和周报（休市日与最近交易日对齐），然后才给外部服务发送心跳。首次真实心跳后，外部服务会提醒后续漏报；新建 Check 尚未收到第一条心跳时不能当作监控已生效。
 
 周报计划为北京时间周六 17:35，宽限 2 小时，19:35 起检查该周报。巡检按 Asia/Shanghai 的当前时间寻找最近一个已到截止时间的周六；进入周一、长假或新 ISO 年也不会免除这一要求。到期周必须存在，准备版本和部署版本必须一致；更晚的提前周报不能替代它。本版没有首次启动豁免，没有已部署的到期周报就不能报健康。
 
@@ -57,27 +57,27 @@ schema 1/2 会在内存中迁移，下一次成功保存时写入 schema 3。sch
 
 财联社新闻使用来源的发布日期与发布时间，合并为 Asia/Shanghai 的完整时间后按七天窗口筛选。空来源、缺字段和解析失败分别写入 quality；不会使用运行当天补日期，也不会由新闻标题直接触发判断。
 
-## 本地修复验收
+## 当前验收
 
-2026-10-11 的五项补修仅进行本地离线验收。工作区清理与补修仍未提交，新增 `public_sources.py` 必须包含在最终提交清单。生产公开 state 未迁移、未覆盖；未推送、部署或发送真实通知。仓库外工作区备份：`D:\每周推送\market_advisor-fix-backup-20261011`，16 个复制文件已经逐一校验 SHA-256。
+2026-10-11 的五项补修与上线准备已经提交并真实上线。首期 W41 的 prepare、Pages 部署、公开全部文件哈希核验、4 个订阅渠道接受及外部心跳均已验收；详细首次上线证据位于仓库外 `market-advisor-launch-review-20261011.md`。
 
-本地验收命令全部退出 0：Python 3.12 公共测试 42/42（原有 19 项加 23 项补修用例）、规则 85/85、止盈 15/15、门禁 23/23、`pip check`、20 个根目录 Python 文件内存编译和 `git diff --check`。新增用例先复现五项错误，再验证模板升级、schema 1/2 迁移保留、manifest 篡改、发送前后 Git 推送失败、崩溃、人工核对、多收件人、周六截止/跨年/长假、真实格式新闻和 Bash 查询失败。普通日与新一期周六 prepare 均使用临时目录、fake collector/fetcher 与 fake 日历；没有访问真实渠道或远程账本。
+2026-10-13 调度维修的 Python 3.12 公共测试 62/62、依赖检查、23 个 Python 文件语法检查和工作流 actionlint 均通过，云端 CI [38332387343](https://github.com/Evanlei2025/market-advisor/actions/runs/38332387343) 通过。
 
-生产 `public_data/state.json` 的 SHA-256 与备份一致，并与 HEAD 无差异。项目中没有新增字节码、日志、报告或测试站点残留。`master` 仍是 `37c0695`，本地记录的 `origin/master` 仍是 `afcd6af`；领先 1 个提交仍指此前迁移提交，不包括工作区补修。
+10-12 历史普通日补跑 [38332494667](https://github.com/Evanlei2025/market-advisor/actions/runs/38332494667) 成功；快照现为 10-09、10-12，3 条观察参考点为 10-12。W41 首次发布时间、deployment_id、页面哈希和 delivered 时间均保持不变；订阅发送步骤跳过，pending=0、unknown=0，公开 manifest/全部页面哈希独立复核通过。生产心跳恢复 [38333092559](https://github.com/Evanlei2025/market-advisor/actions/runs/38333092559) 成功。
 
-真实采集、Pages 公开 URL 核验、渠道通知及一个真实工作日和周六的连续观察仍属于后续上线验收，离线测试不能代替它们。
+独立 Check 的故障与恢复状态演练 [38333150321](https://github.com/Evanlei2025/market-advisor/actions/runs/38333150321) 成功，外部观测到 down→up 后暂停测试 Check；生产周期/宽限仍为 86400 秒。用户确认尚未收到故障和恢复邮件，因此邮件告警实际收件验收未通过，不能把 Check 状态恢复当作邮件送达证据。需核查 Email 集成的验证、启用状态、故障/恢复通知选项、通知错误与邮箱垃圾邮件，再用独立测试 Check 复验。10-13、10-17 后续任务单独记录。
 
-## 首次启动与待上线检查
+维修备份分支 `backup/pre-schedule-repair-20261013` 和仓库外 `market-advisor-schedule-backup-20261013/state.json` 保留；旧模块与归档继续保留，不能因离线验收通过而删除。
+
+## 首次启动规则
 
 默认采用周末首发：上海时间周六 19:35 之后或周日完成第一次 prepare、真实部署及通知。首期周次必须与 `public_health.due_week` 一致；行情截至真实交易日历确认的最近完整交易日，不能修改 date/asof 冒充过去周报。当前空账本不能在工作日直接首发，否则本周首期无法满足心跳对上周的要求。
 
-2026-10-11 周日是符合条件的窗口，但仍须先获得明确上线指令、确认云端配置及完成真实链路核验。如果错过该窗口，下一默认窗口为 2026-10-17 周六 19:35 后至 10-18 周日（Asia/Shanghai）。定时周六 17:35 适用于已经启动的服务；空状态首发应在上述窗口手动运行。必须工作日首发时，先独立实现首次成功发布起始时间和首发/周六正式版规则，并验收后再上线，不降低旧服务的漏报检查。
+本服务已于 2026-10-11 周日完成首发。定时周六 17:35 适用于已经启动的服务；将来新空状态首发应在上海时间周六 19:35 后或周日手动运行。必须工作日首发时，先独立实现首次成功发布起始时间和首发/周六正式版规则，并验收后再上线，不降低漏报检查。
 
 目标仓库 `Evanlei2025/market-advisor`，分支 `master`，公开地址 `https://Evanlei2025.github.io/market-advisor/`。上线前需要确认 Pages 使用 GitHub Actions，公共收件 Secret `ADVISOR_CONFIG`、心跳 `PUBLIC_HEARTBEAT_URL` 和维护者失败告警 `SERVERCHAN_KEY` 已配置且可用；`DEEPSEEK_API_KEY` 可选。只记录配置存在与否，不能输出密钥值。
 
-本轮仅补充公开页面门禁与周末首发测试。工作区有独立备份 `D:\每周推送\market_advisor-prelaunch-backup-20261011`（11 个文件已核对 SHA-256）。远端只读查询连接失败，GitHub 当前提交、Pages 配置与 Secrets 尚未确认。明确提交清单和上线验收表位于项目外的 `D:\每周推送\market-advisor-launch-review-20261011.md`；没有明确上线指令时不提交、推送或真实发送。
-
-上线准备验收：公共测试 48/48（五项补修的 42 项加本轮 6 项），Python 3.12 `pip check`、20 个文件内存编译通过。按明确清单暂存 19 个文件，包含 `public_sources.py`，排除了生产 state、真实配置和仓库外归档。首次将新增模块纳入暂存检查时，修正了原有文件末尾多余空行；暂存差异检查通过。未新增提交，生产公开状态与本轮备份及 HEAD 一致。
+首次上线备份 `market_advisor-prelaunch-backup-20261011` 与明确清单继续保留；`public_sources.py` 已纳入上线提交。
 
 ## 定时延迟与历史补跑
 
@@ -89,9 +89,9 @@ schema 1/2 会在内存中迁移，下一次成功保存时写入 schema 3。sch
 
 实际启动时间、推算调度时段和延迟秒数写入 Actions 日志与摘要。超过 2 小时延迟时单独通知维护者；失败告警含 workflow、run ID/链接、失败阶段、逻辑日期和当前账本行情日。失败告警只使用维护者渠道。
 
-独立故障演练使用 `public-repair-drill` 和 `PUBLIC_DRILL_HEARTBEAT_URL`。演练只在内存副本删除快照，通过独立 Healthchecks Check 的 Email 集成测试故障和恢复；不会落账、部署或调用生产订阅渠道。生产 Check 的 1 天周期和宽限保持不变，测试 Check 在外部观测到 down→up 后暂停，以避免后续测试噪声。告警邮箱实际收件仍需确认。
+独立故障演练使用 `public-repair-drill` 和 `PUBLIC_DRILL_HEARTBEAT_URL`。演练只在内存副本删除快照，通过独立 Healthchecks Check 的 Email 集成测试故障和恢复；不会落账、部署或调用生产订阅渠道。生产 Check 的 1 天周期和宽限保持不变，测试 Check 在外部观测到 down→up 后暂停，以避免后续测试噪声。Email 集成需单独验证并启用故障及恢复通知；账号登录、API 查询到 Email 渠道或 Ping 请求被接受均不能证明邮件已送达。
 
-10 月 12 日普通日需要历史补跑，10 月 13 日普通日必须等到 19:35 后；10 月 17 日周六应产生 W42，正常行情截至 10 月 16 日。真实未来任务未完成前不标记验收通过。
+10 月 12 日普通日历史补跑已经完成，10 月 13 日普通日必须等到 19:35 后；10 月 17 日周六应产生 W42，正常行情截至 10 月 16 日。真实未来任务未完成前不标记验收通过。
 
 ## 客户数据迁移
 
