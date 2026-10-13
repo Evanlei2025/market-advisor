@@ -1,0 +1,41 @@
+name: public-repair-drill
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  independent-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PUBLIC_CONTEXT_FILE: /tmp/public-drill-context-${{ github.run_id }}-${{ github.run_attempt }}.json
+      PUBLIC_DRILL_HEARTBEAT_URL: ${{ secrets.PUBLIC_DRILL_HEARTBEAT_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Resolve the actual completed market day
+        run: python public_schedule.py --heartbeat --output "$PUBLIC_CONTEXT_FILE"
+      - name: Arm the independent test check
+        run: python public_drill.py seed
+      - name: Inject missing snapshot in memory only
+        id: inject
+        continue-on-error: true
+        run: python public_drill.py inject
+      - name: Require the injected failure and notify test email channel
+        env:
+          INJECTION_OUTCOME: ${{ steps.inject.outcome }}
+        run: |
+          test "$INJECTION_OUTCOME" = failure
+          python public_drill.py alert
+      - name: Allow the external test alert to be processed
+        run: sleep 90
+      - name: Recover only after real production state passes
+        run: python public_drill.py recover

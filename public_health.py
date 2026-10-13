@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import os
+import argparse
+import json
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 import requests
 
@@ -11,6 +14,7 @@ import public_brief
 import public_market
 import public_runner
 import public_store
+import public_schedule
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -30,9 +34,10 @@ def due_week(now):
 
 
 def assert_current(state, now, expected):
-    if not state["snapshots"] or state["snapshots"][-1]["asof"] != expected:
-        raise ValueError(f"missing market snapshot for {expected}")
     wk = due_week(now)
+    if not state["snapshots"] or state["snapshots"][-1]["asof"] != expected:
+        latest = state["snapshots"][-1]["asof"] if state["snapshots"] else "none"
+        raise ValueError(f"missing market snapshot for {expected}; latest {latest}; due weekly edition {wk}")
     if wk not in state["weeks"]:
         raise ValueError("missing weekly edition " + wk)
     for edition in {wk, max(state["weeks"])}:
@@ -51,17 +56,31 @@ def assert_current(state, now, expected):
         raise ValueError("delivery incomplete: " + ", ".join(state["pending"]))
 
 
-def main():
-    url = os.environ.get("PUBLIC_HEARTBEAT_URL", "")
+def check_run(state_path=public_runner.STATE, url=None, now=None, context=None,
+              fetcher=None, transport=requests.get):
+    url = url if url is not None else os.environ.get("PUBLIC_HEARTBEAT_URL", "")
     if not url.startswith("https://"):
         raise ValueError("PUBLIC_HEARTBEAT_URL missing or invalid")
-    now = datetime.now(TZ)
+    now = now or datetime.now(TZ)
+    context = context or public_schedule.resolve(now=now, heartbeat=True)
+    logical_date = public_schedule.parse_date(context["logical_date"])
     from public_sources import DataFetcher
-    fetcher = DataFetcher()
-    expected = public_market.expected_session(now.date(), fetcher)
-    assert_current(public_store.load(public_runner.STATE), now, expected)
-    response = requests.get(url, timeout=15)
+    fetcher = fetcher or DataFetcher()
+    expected = public_market.expected_session(logical_date, fetcher)
+    assert_current(public_store.load(state_path), now, expected)
+    response = transport(url, timeout=15)
     response.raise_for_status()
+    return expected
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--logical-date")
+    parser.add_argument("--context", default=os.environ.get("PUBLIC_CONTEXT_FILE"))
+    args = parser.parse_args()
+    context = (json.loads(Path(args.context).read_text(encoding="utf-8")) if args.context else
+               public_schedule.resolve(logical_date=args.logical_date, heartbeat=True))
+    print("Verified market snapshot " + check_run(context=context))
 
 
 if __name__ == "__main__":

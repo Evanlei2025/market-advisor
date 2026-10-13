@@ -11,6 +11,14 @@ on:
         type: boolean
         description: Publish a weekly edition now
         default: false
+      logical_date:
+        type: string
+        description: Explicit logical date YYYY-MM-DD (historical recovery)
+        default: ''
+      backfill:
+        type: boolean
+        description: Recover historical snapshot/observation only; suppress new alerts
+        default: false
 
 permissions:
   contents: write
@@ -25,19 +33,41 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 42
+    env:
+      PUBLIC_CONTEXT_FILE: /tmp/public-run-context-${{ github.run_id }}-${{ github.run_attempt }}.json
     steps:
       - uses: actions/checkout@v4
+        id: checkout
         with:
           ref: master
       - uses: actions/setup-python@v5
+        id: python
         with:
           python-version: '3.12'
+      - name: Resolve logical task date and record scheduler delay
+        id: context
+        env:
+          PUBLIC_SCHEDULE: ${{ github.event.schedule }}
+          PUBLIC_RUN_KIND: ${{ inputs.publish_weekly && 'weekly' || 'daily' }}
+          PUBLIC_LOGICAL_DATE: ${{ inputs.logical_date }}
+          PUBLIC_BACKFILL: ${{ inputs.backfill }}
+        run: python public_schedule.py --output "$PUBLIC_CONTEXT_FILE"
+      - name: Notify operator of scheduler delay
+        id: delay
+        env:
+          SC_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python public_ops.py --delay
       - run: pip install -r requirements.txt
+        id: install
       - run: python -m pip check
+        id: dependencies
       - run: python -m compileall -q .
+        id: syntax
       - name: Offline verification
+        id: tests
         run: python -m unittest -q test_public.py
       - name: Validate delivery and monitoring before cutover
+        id: config
         env:
           ADVISOR_DELIVERY_JSON: ${{ secrets.ADVISOR_CONFIG }}
           PUBLIC_HEARTBEAT_URL: ${{ secrets.PUBLIC_HEARTBEAT_URL }}
@@ -48,16 +78,12 @@ jobs:
             exit 1
           fi
       - name: Build public research
+        id: prepare
         env:
-          FORCE_WEEKLY: ${{ inputs.publish_weekly }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          if [ "$FORCE_WEEKLY" = 'true' ]; then
-            python public_runner.py prepare --weekly
-          else
-            python public_runner.py prepare
-          fi
+        run: python public_runner.py prepare --context "$PUBLIC_CONTEXT_FILE"
       - name: Commit public research state
+        id: state
         run: |
           git config user.name "market-advisor-bot"
           git config user.email "actions@users.noreply.github.com"
@@ -67,15 +93,19 @@ jobs:
             git push origin HEAD:master
           fi
       - uses: actions/configure-pages@v5
+        id: pages_config
       - uses: actions/upload-pages-artifact@v3
+        id: artifact
         with:
           path: public_site
       - name: Deploy public pages
         id: pages
         uses: actions/deploy-pages@v4
       - name: Verify public Pages content before notifications
+        id: verify
         run: python public_runner.py verify-live
       - name: Record verified Pages deployment
+        id: deployed
         env:
           PAGES_DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -86,6 +116,8 @@ jobs:
             git push origin HEAD:master
           fi
       - name: Send subscribed notifications
+        id: notify
+        if: ${{ !inputs.backfill }}
         env:
           ADVISOR_DELIVERY_JSON: ${{ secrets.ADVISOR_CONFIG }}
         run: |
@@ -109,9 +141,5 @@ jobs:
         if: failure()
         env:
           SC_KEY: ${{ secrets.SERVERCHAN_KEY }}
-        run: |
-          if [ -n "$SC_KEY" ]; then
-            curl --fail --silent --show-error --max-time 15 -X POST "https://sctapi.ftqq.com/${SC_KEY}.send" \
-              --data-urlencode "title=公共市场简报运行失败" \
-              --data-urlencode "desp=GitHub Actions 运行失败，请检查工作流日志。" > /dev/null
-          fi
+          PUBLIC_STEPS_JSON: ${{ toJson(steps) }}
+        run: python public_ops.py

@@ -19,6 +19,189 @@ import public_market
 import public_runner
 import public_sources
 import public_store
+import public_schedule
+import public_ops
+
+
+class DelayedScheduleTests(unittest.TestCase):
+    def now(self, value):
+        return datetime.fromisoformat(value + "+08:00")
+
+    def calendar(self):
+        class Fetcher:
+            def trade_calendar(self):
+                return pd.DataFrame({"trade_date": ["2026-10-09", "2026-10-12", "2026-10-13",
+                                                     "2026-10-14", "2026-10-15", "2026-10-16",
+                                                     "2026-10-19", "2026-10-20"]})
+        return Fetcher()
+
+    def baseline(self):
+        state = deploy_fixture(public_runner.prepare(public_store.empty_state(), fixture("2026-10-09"), True),
+                               "2026-10-11")
+        state["delivered"]["weekly:2026-W41"] = "2026-10-11T17:16:24+08:00"
+        state["pending"].clear()
+        return state
+
+    def test_delayed_sunday_heartbeat_checks_friday(self):
+        now = self.now("2026-10-12T02:58:00")
+        context = public_schedule.resolve(now=now, schedule=public_schedule.HEARTBEAT_CRON, heartbeat=True)
+        self.assertEqual(context["logical_date"], "2026-10-11")
+        self.assertEqual(context["delay_seconds"], 4 * 3600 + 41 * 60)
+        self.assertTrue(context["delay_exceeds_grace"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            public_store.save(path, self.baseline())
+            response = unittest.mock.Mock()
+            ping = unittest.mock.Mock(return_value=response)
+            self.assertEqual(public_health.check_run(path, "https://example.test/ping", now, context,
+                                                     self.calendar(), ping), "2026-10-09")
+            ping.assert_called_once()
+
+    def test_delayed_monday_daily_checks_monday(self):
+        context = public_schedule.resolve(now=self.now("2026-10-13T04:25:00"),
+                                          schedule=public_schedule.DAILY_CRON)
+        self.assertEqual(context["logical_date"], "2026-10-12")
+        self.assertEqual(context["kind"], "daily")
+        self.assertEqual(context["delay_seconds"], 8 * 3600 + 50 * 60)
+        fetcher = NewsFetcher(pd.DataFrame(), day="2026-10-13")
+        fetcher.trade_calendar = self.calendar().trade_calendar
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            baseline = self.baseline()
+            public_store.save(path, baseline)
+            state = public_runner.prepare_run(path, Path(tmp, "site"), fetcher=fetcher, context=context)
+            self.assertEqual(state["snapshots"][-1]["asof"], "2026-10-12")
+            self.assertEqual(state["weeks"], baseline["weeks"])
+            self.assertEqual(state["deployed_pages"], baseline["deployed_pages"])
+
+    def test_saturday_delay_to_sunday_or_monday_still_produces_w42(self):
+        for started in ("2026-10-18T03:00:00", "2026-10-19T04:00:00"):
+            context = public_schedule.resolve(now=self.now(started), schedule=public_schedule.WEEKLY_CRON)
+            self.assertEqual(context["logical_date"], "2026-10-17")
+            self.assertEqual(context["kind"], "weekly")
+            with tempfile.TemporaryDirectory() as tmp, patch("public_ai.explain", return_value=None):
+                path = Path(tmp, "state.json")
+                baseline = public_runner.prepare(self.baseline(), fixture("2026-10-16"))
+                public_store.save(path, baseline)
+                result = public_runner.prepare_run(path, Path(tmp, "site"), fetcher=self.calendar(), context=context)
+                self.assertIn("2026-W42", result["weeks"])
+                self.assertEqual(result["week_asof"]["2026-W42"], "2026-10-16")
+
+    def test_market_cutoff_ignores_todays_planned_session(self):
+        for started, expected in (("2026-10-13T00:00:00", "2026-10-12"),
+                                  ("2026-10-13T19:34:59", "2026-10-12"),
+                                  ("2026-10-13T19:35:00", "2026-10-13")):
+            context = public_schedule.resolve(now=self.now(started), heartbeat=True)
+            self.assertEqual(public_market.expected_session(public_schedule.parse_date(context["logical_date"]),
+                                                           self.calendar()), expected)
+
+    def test_delayed_weekly_after_monday_publication_uses_friday_snapshot(self):
+        context = public_schedule.resolve(now=self.now("2026-10-19T20:00:00"), schedule=public_schedule.WEEKLY_CRON)
+        with tempfile.TemporaryDirectory() as tmp, patch("public_ai.explain", return_value=None):
+            path = Path(tmp, "state.json")
+            state = public_runner.prepare(self.baseline(), fixture("2026-10-16"))
+            state = public_runner.prepare(state, fixture("2026-10-19"))
+            public_store.save(path, state)
+            result = public_runner.prepare_run(path, Path(tmp, "site"), context=context, fetcher=self.calendar())
+            self.assertEqual(result["week_asof"]["2026-W42"], "2026-10-16")
+            self.assertEqual(result["snapshots"][-1]["asof"], "2026-10-19")
+
+    def test_missing_multiple_sessions_stops_before_fetch_mutation_or_notification(self):
+        context = public_schedule.resolve(now=self.now("2026-10-14T04:25:00"), schedule=public_schedule.DAILY_CRON)
+        with tempfile.TemporaryDirectory() as tmp:
+            path, site = Path(tmp, "state.json"), Path(tmp, "site")
+            public_store.save(path, self.baseline())
+            original = path.read_bytes()
+            with patch("public_market.collect") as collect, patch("public_runner.send") as sender:
+                with self.assertRaisesRegex(ValueError, "需要补跑历史日期"):
+                    public_runner.prepare_run(path, site, context=context, fetcher=self.calendar())
+                collect.assert_not_called()
+                sender.assert_not_called()
+            self.assertEqual(path.read_bytes(), original)
+            self.assertFalse(site.exists())
+
+    def test_weekly_delay_beyond_one_session_requires_explicit_backfill(self):
+        context = public_schedule.resolve(now=self.now("2026-10-20T20:00:00"), schedule=public_schedule.WEEKLY_CRON)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            public_store.save(path, public_runner.prepare(self.baseline(), fixture("2026-10-16")))
+            with self.assertRaisesRegex(ValueError, "需要补跑历史日期"):
+                public_runner.prepare_run(path, Path(tmp, "site"), context=context, fetcher=self.calendar())
+
+    def test_explicit_current_day_before_close_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "wait until 19:35"):
+            public_schedule.resolve(now=self.now("2026-10-13T08:00:00"), kind="daily", logical_date="2026-10-13")
+        with self.assertRaisesRegex(ValueError, "explicit historical"):
+            public_schedule.resolve(now=self.now("2026-10-13T08:00:00"), kind="daily", backfill=True)
+
+    def test_backfill_and_next_day_preserve_first_publication_and_suppress_history_alert(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("public_market.research", side_effect=lambda value: value):
+            path, site = Path(tmp, "state.json"), Path(tmp, "site")
+            baseline = self.baseline()
+            public_store.save(path, baseline)
+            for day, started, backfill in (("2026-10-12", "2026-10-13T08:00:00", True),
+                                           ("2026-10-13", "2026-10-13T19:35:00", False)):
+                context = public_schedule.resolve(now=self.now(started), kind="daily", logical_date=day, backfill=backfill)
+                state = public_runner.prepare_run(path, site, context=context,
+                                                  collector=lambda **kwargs: fixture(kwargs["today"].isoformat(), "等待确认"))
+                public_runner.mark_deployed(path, output=site, deployment_id="daily-" + day)
+            state = public_store.load(path)
+            self.assertEqual([s["asof"] for s in state["snapshots"]], ["2026-10-09", "2026-10-12", "2026-10-13"])
+            self.assertEqual(state["deployed_pages"]["weekly:2026-W41"], baseline["deployed_pages"]["weekly:2026-W41"])
+            self.assertEqual(state["delivered"], baseline["delivered"])
+            self.assertEqual(state["pending"], {})
+            self.assertEqual(state["observations"][0]["reference_date"], "2026-10-12")
+            self.assertEqual([p["date"] for p in state["observations"][0]["path"]], ["2026-10-12", "2026-10-13"])
+            self.assertEqual(public_brief.validate_manifest(site)["pages"], state["prepared_pages"])
+
+    def test_historical_snapshot_cannot_be_inserted_after_newer_state(self):
+        state = public_runner.prepare(self.baseline(), fixture("2026-10-13"))
+        with self.assertRaisesRegex(ValueError, "date order"):
+            public_runner.prepare(state, fixture("2026-10-12"), suppress_alerts=True)
+
+    def test_missing_monday_snapshot_blocks_ping_and_names_week(self):
+        now = self.now("2026-10-13T06:09:00")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            public_store.save(path, self.baseline())
+            ping = unittest.mock.Mock()
+            with self.assertRaisesRegex(ValueError, "2026-10-12.*2026-W41"):
+                public_health.check_run(path, "https://example.test/ping", now, fetcher=self.calendar(), transport=ping)
+            ping.assert_not_called()
+
+    def test_w42_missing_undeployed_or_incomplete_heartbeat_names_week(self):
+        now = self.now("2026-10-17T22:17:00")
+        baseline = public_runner.prepare(self.baseline(), fixture("2026-10-16"))
+        with self.assertRaisesRegex(ValueError, "2026-W42"):
+            public_health.assert_current(baseline, now, "2026-10-16")
+        research = fixture("2026-10-16")
+        research["date"] = "2026-10-17"
+        state = public_runner.prepare(baseline, research, True)
+        with self.assertRaisesRegex(ValueError, "2026-W42"):
+            public_health.assert_current(state, now, "2026-10-16")
+        state = deploy_fixture(state, "2026-10-17")
+        with self.assertRaisesRegex(ValueError, "2026-W42"):
+            public_health.assert_current(state, now, "2026-10-16")
+
+    def test_failure_alert_has_run_stage_date_and_current_market(self):
+        context = public_schedule.resolve(now=self.now("2026-10-13T04:25:00"), schedule=public_schedule.DAILY_CRON)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            public_store.save(path, self.baseline())
+            text = public_ops.alert_details(context, {"prepare": {"outcome": "failure"}}, path,
+                                           {"GITHUB_WORKFLOW": "public-market-brief", "GITHUB_RUN_ID": "38304014901"})
+            for expected in ("public-market-brief", "38304014901", "actions/runs/38304014901", "prepare",
+                             "2026-10-12", "2026-10-09", "Schedule delay"):
+                self.assertIn(expected, text)
+
+    def test_workflows_pass_schedule_context_and_gate_backfill_notifications(self):
+        daily = Path(".github/workflows/daily-report.yml").read_text(encoding="utf-8")
+        heartbeat = Path(".github/workflows/public-heartbeat.yml").read_text(encoding="utf-8")
+        for workflow in (daily, heartbeat):
+            self.assertIn("${{ github.event.schedule }}", workflow)
+            self.assertIn("--context", workflow)
+            self.assertIn("${{ toJson(steps) }}", workflow)
+        self.assertIn("if: ${{ !inputs.backfill }}", daily)
 
 
 def fixture(day="2026-08-12", state="优先研究"):

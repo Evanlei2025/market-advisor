@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from time import sleep
 from zoneinfo import ZoneInfo
@@ -17,12 +17,25 @@ import public_brief
 import public_market
 import public_sources
 import public_store
+import public_schedule
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "public_data" / "state.json"
 SITE = ROOT / "public_site"
 URL = "https://Evanlei2025.github.io/market-advisor/"
 TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _session_gap(last_asof, expected, fetcher):
+    """Count verified sessions between two dates for delayed-run protection."""
+    if not last_asof or expected <= last_asof:
+        return 0
+    calendar = fetcher.trade_calendar()
+    if calendar is None or "trade_date" not in calendar:
+        raise ValueError("verified trading calendar unavailable for delayed-run check")
+    dates = public_market.pd.to_datetime(calendar["trade_date"], errors="coerce").dt.date.dropna()
+    return int(((dates > date.fromisoformat(last_asof)) &
+                (dates <= date.fromisoformat(expected))).sum())
 
 
 def _candidate_events(now, before, older=None):
@@ -58,13 +71,15 @@ def _recently_notified(store, entity, asof):
                for record in store["alerts"])
 
 
-def prepare(store, research, weekly_due=False):
+def prepare(store, research, weekly_due=False, suppress_alerts=False):
     import copy
     store = copy.deepcopy(store)
     previous = store["snapshots"][-1] if store["snapshots"] else None
     asof = research["asof"]
-    if not previous or previous["asof"] != asof:
-        events = _candidate_events(research, previous,
+    if previous and asof < previous["asof"] and not weekly_due:
+        raise ValueError("historical snapshot precedes latest state; backfill must run in date order")
+    if not previous or previous["asof"] < asof:
+        events = [] if suppress_alerts else _candidate_events(research, previous,
                                    store["snapshots"][-2] if len(store["snapshots"]) >= 2 else None)
         events = [event for event in events if not _recently_notified(store, event["entity"], asof)]
         store["snapshots"].append(research)
@@ -147,20 +162,40 @@ def brief_message(research, previous, wk):
     return "\n".join(lines)
 
 
-def prepare_run(state_path=STATE, output=SITE, today=None, weekly_due=None, collector=None, fetcher=None):
-    today = today or datetime.now(TZ).date()
+def prepare_run(state_path=STATE, output=SITE, today=None, weekly_due=None, collector=None, fetcher=None,
+                context=None, backfill=False):
+    if context is None and today is None:
+        context = public_schedule.resolve()
+    if context:
+        today = public_schedule.parse_date(context["logical_date"])
+        weekly_due = context["kind"] == "weekly"
+        backfill = context.get("backfill", False)
+    else:
+        today = public_schedule.parse_date(today)
     state = public_store.load(state_path)
     weekly_due = (today.weekday() == 5 or not state["weeks"]) if weekly_due is None else weekly_due
     # A Saturday digest uses the most recent complete daily observation.
     if fetcher is None and (collector is None or (weekly_due and today.weekday() >= 5 and state["snapshots"])):
         fetcher = public_sources.DataFetcher()
-    if weekly_due and today.weekday() >= 5 and state["snapshots"]:
-        latest = state["snapshots"][-1]
+    if collector is None or collector is public_market.collect:
         expected = public_market.expected_session(today, fetcher)
-        if latest["asof"] == expected:
-            research = dict(latest, date=today.isoformat())
+        previous_asof = state["snapshots"][-1]["asof"] if state["snapshots"] else None
+        if previous_asof and expected < previous_asof and not weekly_due:
+            raise ValueError("historical snapshot precedes latest state; backfill must run in date order")
+        if previous_asof and _session_gap(previous_asof, expected, fetcher) > 1:
+            raise ValueError(f"需要补跑历史日期：最新快照 {previous_asof}，目标行情 {expected}；请逐日显式 backfill")
+        if context and not backfill:
+            completed = public_schedule.completed_day(datetime.fromisoformat(context["observed_at"]).astimezone(TZ))
+            last_completed = public_market.expected_session(completed, fetcher)
+            if _session_gap(expected, last_completed, fetcher) > 1:
+                raise ValueError(f"需要补跑历史日期：任务 {today} 已延迟超过一个交易日；禁止自动跳过")
+    if weekly_due and today.weekday() >= 5 and state["snapshots"]:
+        expected = public_market.expected_session(today, fetcher)
+        matching = next((item for item in reversed(state["snapshots"]) if item["asof"] == expected), None)
+        if matching:
+            research = dict(matching, date=today.isoformat())
         else:
-            raise ValueError(f"周报快照截至{latest['asof']}，最近交易日应为{expected}")
+            raise ValueError(f"周报 {public_brief.week_id(today.isoformat())} 缺少截至 {expected} 的快照，需要补跑历史日期")
     else:
         raw = (collector or public_market.collect)(today=today, fetcher=fetcher)
         research = public_market.research(raw)
@@ -173,9 +208,10 @@ def prepare_run(state_path=STATE, output=SITE, today=None, weekly_due=None, coll
         expected = public_market.expected_session(today, fetcher)
         if research["asof"] != expected:
             raise ValueError(f"行情日期{research['asof']}未对齐最近交易日{expected}")
-    updated = prepare(state, research, weekly_due)
+    updated = prepare(state, research, weekly_due, suppress_alerts=backfill)
     if not updated["weeks"]:
         raise ValueError("no public weekly page to deploy")
+    public_store.validate(updated)
     public_brief.render_site(output, updated["weeks"], updated["alerts"])
     public_store.save(state_path, updated)
     return updated
@@ -426,6 +462,10 @@ def main():
     parser.add_argument("phase", nargs="?", default="prepare",
                         choices=["prepare", "verify-live", "deployed", "recipients", "events", "reserve", "notify", "reconcile"])
     parser.add_argument("--weekly", action="store_true", help="Publish an edition outside the Saturday schedule")
+    parser.add_argument("--logical-date")
+    parser.add_argument("--run-kind", choices=["auto", "daily", "weekly"], default="auto")
+    parser.add_argument("--backfill", action="store_true", help="Explicit historical recovery; suppress new change notifications")
+    parser.add_argument("--context", default=os.environ.get("PUBLIC_CONTEXT_FILE"))
     parser.add_argument("--recipient")
     parser.add_argument("--attempt")
     parser.add_argument("--event")
@@ -433,7 +473,12 @@ def main():
     parser.add_argument("--deployment-id")
     args = parser.parse_args()
     if args.phase == "prepare":
-        prepare_run(weekly_due=True if args.weekly else None)
+        if args.context:
+            context = json.loads(Path(args.context).read_text(encoding="utf-8"))
+        else:
+            context = public_schedule.resolve(kind="weekly" if args.weekly else args.run_kind,
+                                              logical_date=args.logical_date, backfill=args.backfill)
+        prepare_run(context=context)
     elif args.phase == "verify-live":
         print("Verified public Pages site " + verify_live_run())
     elif args.phase == "deployed":

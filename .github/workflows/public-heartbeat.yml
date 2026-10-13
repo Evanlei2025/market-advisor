@@ -5,6 +5,11 @@ on:
     # Every day 22:17 China time, after the daily publication window.
     - cron: '17 14 * * *'
   workflow_dispatch:
+    inputs:
+      logical_date:
+        type: string
+        description: Optional logical market cutoff date YYYY-MM-DD
+        default: ''
 
 permissions:
   contents: read
@@ -13,23 +18,38 @@ jobs:
   watchdog:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      PUBLIC_CONTEXT_FILE: /tmp/public-run-context-${{ github.run_id }}-${{ github.run_attempt }}.json
     steps:
       - uses: actions/checkout@v4
+        id: checkout
+        with:
+          ref: master
       - uses: actions/setup-python@v5
+        id: python
         with:
           python-version: '3.12'
+      - name: Resolve logical heartbeat date and record scheduler delay
+        id: context
+        env:
+          PUBLIC_SCHEDULE: ${{ github.event.schedule }}
+          PUBLIC_LOGICAL_DATE: ${{ inputs.logical_date }}
+        run: python public_schedule.py --heartbeat --output "$PUBLIC_CONTEXT_FILE"
+      - name: Notify operator of scheduler delay
+        id: delay
+        env:
+          SC_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python public_ops.py --delay
       - run: pip install -r requirements.txt
+        id: install
       - name: Verify report state and notify external monitor
+        id: verify
         env:
           PUBLIC_HEARTBEAT_URL: ${{ secrets.PUBLIC_HEARTBEAT_URL }}
-        run: python public_health.py
+        run: python public_health.py --context "$PUBLIC_CONTEXT_FILE"
       - name: Notify operator on failure
         if: failure()
         env:
           SC_KEY: ${{ secrets.SERVERCHAN_KEY }}
-        run: |
-          if [ -n "$SC_KEY" ]; then
-            curl --fail --silent --show-error --max-time 15 -X POST "https://sctapi.ftqq.com/${SC_KEY}.send" \
-              --data-urlencode "title=市场简报巡检失败" \
-              --data-urlencode "desp=请检查最近公开快照、周报及 GitHub Actions。" > /dev/null
-          fi
+          PUBLIC_STEPS_JSON: ${{ toJson(steps) }}
+        run: python public_ops.py
