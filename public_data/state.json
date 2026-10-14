@@ -3619,7 +3619,12 @@
     "alert:2026-10-14": {
       "body": "市场变化提醒｜数据截至2026-10-14\n医药生物：优先研究→等待确认；近20日相对沪深300+4.3个百分点。请看报告中的证据与失效条件。\n房地产：优先研究→等待确认；近20日相对沪深300+4.5个百分点。请看报告中的证据与失效条件。\n银行：等待确认→优先研究；近20日相对沪深300+10.4个百分点。请看报告中的证据与失效条件。\n仅供公开市场研究，不对应个人持仓或具体交易。",
       "url": "https://Evanlei2025.github.io/market-advisor/alerts/2026-10-14.html",
-      "recipients": {},
+      "recipients": {
+        "receiver-910b91d4c03fff13": {
+          "status": "reserved",
+          "attempt": "38593792559-1-receiver-910b91d4c03fff13-alert:2026-10-14"
+        }
+      },
       "kind": "alert",
       "page_version": "885e53ce28ff86d3baec7bdc412e46ba2da48c567d2c7bb30ed7ec0c1b0522b6"
     }
