@@ -3625,7 +3625,7 @@
           "attempt": "38593792559-1-receiver-910b91d4c03fff13-alert:2026-10-14"
         },
         "receiver-896f3dbf4580dc6d": {
-          "status": "unknown",
+          "status": "accepted",
           "attempt": "38593792559-1-receiver-896f3dbf4580dc6d-alert:2026-10-14"
         }
       },
