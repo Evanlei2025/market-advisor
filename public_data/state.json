@@ -3629,7 +3629,7 @@
           "attempt": "38593792559-1-receiver-896f3dbf4580dc6d-alert:2026-10-14"
         },
         "receiver-af9293b53b85e45f": {
-          "status": "unknown",
+          "status": "accepted",
           "attempt": "38593792559-1-receiver-af9293b53b85e45f-alert:2026-10-14"
         }
       },
