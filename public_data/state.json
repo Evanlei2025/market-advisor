@@ -3621,7 +3621,7 @@
       "url": "https://Evanlei2025.github.io/market-advisor/alerts/2026-10-14.html",
       "recipients": {
         "receiver-910b91d4c03fff13": {
-          "status": "reserved",
+          "status": "unknown",
           "attempt": "38593792559-1-receiver-910b91d4c03fff13-alert:2026-10-14"
         }
       },
