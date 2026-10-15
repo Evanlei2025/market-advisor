@@ -1,0 +1,7 @@
+name = "market-advisor-external-scheduler"
+main = "worker.js"
+compatibility_date = "2026-10-15"
+workers_dev = false
+
+[triggers]
+crons = ["35 11 * * 1-5", "35 9 * * 6", "17 14 * * *"]

@@ -1,0 +1,66 @@
+name: public-notification-recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        type: string
+        description: Exact pending event id, for example alert:2026-10-14
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: public-market-publication
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m pip check
+      - name: Verify target event is deployed on public Pages
+        env:
+          EVENT_ID: ${{ inputs.event_id }}
+        run: python public_runner.py verify-event-live --event "$EVENT_ID"
+      - name: Send missing recipients
+        env:
+          ADVISOR_DELIVERY_JSON: ${{ secrets.ADVISOR_CONFIG }}
+          EVENT_ID: ${{ inputs.event_id }}
+        run: |
+          set -euo pipefail
+          aliases="$(python public_runner.py recipients)"
+          while IFS= read -r alias; do
+            if [ -z "$alias" ]; then
+              continue
+            fi
+            events="$(python public_runner.py events --recipient "$alias" --event "$EVENT_ID")"
+            while IFS= read -r event; do
+              if [ -z "$event" ]; then
+                continue
+              fi
+              attempt="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${alias}-${event}"
+              python public_runner.py reserve --recipient "$alias" --attempt "$attempt" --event "$event"
+              python public_runner.py notify --recipient "$alias" --attempt "$attempt" --event "$event"
+            done <<< "$events"
+          done <<< "$aliases"
+      - name: Assert event delivery
+        env:
+          ADVISOR_DELIVERY_JSON: ${{ secrets.ADVISOR_CONFIG }}
+          EVENT_ID: ${{ inputs.event_id }}
+        run: python public_runner.py assert-delivered --event "$EVENT_ID"
+      - name: Notify operator on failure
+        if: failure()
+        env:
+          SC_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          PUBLIC_STEPS_JSON: ${{ toJson(steps) }}
+        run: python public_ops.py

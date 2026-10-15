@@ -1,4 +1,5 @@
 name: public-service-heartbeat
+run-name: public-service-heartbeat ${{ inputs.logical_date || 'scheduled' }} ${{ inputs.trigger_id || github.run_id }}
 
 on:
   schedule:
@@ -9,6 +10,14 @@ on:
       logical_date:
         type: string
         description: Optional logical market cutoff date YYYY-MM-DD
+        default: ''
+      scheduled_for:
+        type: string
+        description: Original scheduled slot in ISO-8601 with timezone
+        default: ''
+      trigger_id:
+        type: string
+        description: External scheduler correlation id
         default: ''
 
 permissions:
@@ -34,6 +43,8 @@ jobs:
         env:
           PUBLIC_SCHEDULE: ${{ github.event.schedule }}
           PUBLIC_LOGICAL_DATE: ${{ inputs.logical_date }}
+          PUBLIC_SCHEDULED_FOR: ${{ inputs.scheduled_for }}
+          PUBLIC_TRIGGER_ID: ${{ inputs.trigger_id }}
         run: python public_schedule.py --heartbeat --output "$PUBLIC_CONTEXT_FILE"
       - name: Notify operator of scheduler delay
         id: delay

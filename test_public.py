@@ -134,6 +134,24 @@ class DelayedScheduleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "explicit historical"):
             public_schedule.resolve(now=self.now("2026-10-13T08:00:00"), kind="daily", backfill=True)
 
+    def test_external_schedule_keeps_planned_slot_and_measures_start_delay(self):
+        context = public_schedule.resolve(
+            now=self.now("2026-10-15T23:56:53"), kind="daily", logical_date="2026-10-15",
+            scheduled_for="2026-10-15T19:35:00+08:00", trigger_id="cf-daily-20261015T113500Z")
+        self.assertEqual(context["logical_date"], "2026-10-15")
+        self.assertEqual(context["scheduled_for"], "2026-10-15T19:35:00+08:00")
+        self.assertEqual(context["delay_seconds"], 15713)
+        self.assertTrue(context["delay_exceeds_grace"])
+        self.assertEqual(context["trigger_id"], "cf-daily-20261015T113500Z")
+
+    def test_external_slot_must_match_explicit_task_date_and_kind(self):
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            public_schedule.resolve(now=self.now("2026-10-15T20:00:00"), kind="daily",
+                                   logical_date="2026-10-15", scheduled_for="2026-10-15T22:17:00+08:00")
+        with self.assertRaisesRegex(ValueError, "timezone"):
+            public_schedule.resolve(now=self.now("2026-10-15T20:00:00"), kind="daily",
+                                   logical_date="2026-10-15", scheduled_for="2026-10-15T19:35:00")
+
     def test_backfill_and_next_day_preserve_first_publication_and_suppress_history_alert(self):
         with tempfile.TemporaryDirectory() as tmp, patch("public_market.research", side_effect=lambda value: value):
             path, site = Path(tmp, "state.json"), Path(tmp, "site")
@@ -201,6 +219,8 @@ class DelayedScheduleTests(unittest.TestCase):
             self.assertIn("${{ github.event.schedule }}", workflow)
             self.assertIn("--context", workflow)
             self.assertIn("${{ toJson(steps) }}", workflow)
+            self.assertIn("PUBLIC_SCHEDULED_FOR", workflow)
+            self.assertIn("PUBLIC_TRIGGER_ID", workflow)
         self.assertIn("if: ${{ !inputs.backfill }}", daily)
 
 
@@ -276,10 +296,12 @@ class NewsFetcher(public_sources.DataFetcher):
 
 
 class FixRegressionTests(unittest.TestCase):
-    def live_fixture(self, tmp):
+    def live_fixture(self, tmp, deployed=False):
         path, site = Path(tmp, "state.json"), Path(tmp, "site")
         state = public_runner.prepare(public_store.empty_state(), fixture(), True)
         state = public_runner.prepare(state, fixture("2026-08-13", "暂缓追涨"))
+        if deployed:
+            state = deploy_fixture(state, "2026-08-14")
         public_store.save(path, state)
         public_brief.render_site(site, state["weeks"], state["alerts"])
         manifest = public_brief.validate_manifest(site)
@@ -374,6 +396,105 @@ class FixRegressionTests(unittest.TestCase):
                  "run: python public_runner.py verify-live", "name: Record verified Pages deployment",
                  "name: Send subscribed notifications")]
         self.assertEqual(order, sorted(order))
+
+    def test_notification_recovery_workflow_verifies_and_completes_one_event(self):
+        workflow = (public_runner.ROOT / ".github/workflows/recover-notification.yml").read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("event_id:", workflow)
+        self.assertIn("verify-event-live --event", workflow)
+        self.assertIn('events --recipient "$alias" --event "$EVENT_ID"', workflow)
+        self.assertIn("assert-delivered --event", workflow)
+        order = [workflow.index(text) for text in ("verify-event-live", "name: Send missing recipients",
+                 "name: Assert event delivery")]
+        self.assertEqual(order, sorted(order))
+
+    def test_notification_recovery_verifies_live_pages_without_changing_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, site, manifest = self.live_fixture(tmp, deployed=True)
+            before = path.read_bytes()
+            fetched = []
+
+            def transport(url, **kwargs):
+                name = url.removeprefix(public_runner.URL)
+                fetched.append(name)
+                return self.live_response(manifest, (site / name).read_bytes())
+
+            self.assertEqual(public_runner.verify_event_live_run(
+                "weekly:2026-W33", path, transport=transport), manifest["site_id"])
+            self.assertEqual(fetched, ["manifest.json", *sorted(manifest["files"]), "manifest.json"])
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_recovery_sends_only_missing_recipient_then_clears_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            state = deploy_fixture(public_runner.prepare(public_store.empty_state(), fixture(), True))
+            state = deploy_fixture(public_runner.prepare(state, fixture("2026-08-13", "暂缓追涨")),
+                                   "2026-08-13")
+            config, aliases = delivery_config(4)
+            event_id = "alert:2026-08-13"
+            for index, alias in enumerate(aliases[:3]):
+                state["pending"][event_id]["recipients"][alias] = {
+                    "status": "accepted", "attempt": "original-" + str(index)}
+            public_store.save(path, state)
+
+            for alias in aliases[:3]:
+                self.assertEqual(public_runner.eligible_events(alias, path, config, event_id), [])
+                with self.assertRaises(ValueError):
+                    public_runner.reserve_run(alias, "recovery", event_id, path, config)
+            self.assertEqual(public_runner.eligible_events(aliases[3], path, config, event_id), [event_id])
+
+            sent = []
+            public_runner.reserve_run(aliases[3], "recovery-4", event_id, path, config)
+            public_runner.notify_run(aliases[3], "recovery-4", event_id, path, config,
+                                     sender=lambda *args: sent.append(args))
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(public_runner.assert_event_delivered(event_id, path), True)
+            self.assertEqual(public_runner.eligible_events(aliases[3], path, config, event_id), [])
+            self.assertNotIn(event_id, public_store.load(path)["pending"])
+            self.assertIn(event_id, public_store.load(path)["delivered"])
+
+    def test_event_delivery_audit_does_not_clear_unknown_or_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            state = deploy_fixture(public_runner.prepare(public_store.empty_state(), fixture(), True))
+            event_id = "weekly:2026-W33"
+            config, (alias,) = delivery_config()
+            state["pending"][event_id]["recipients"][alias] = {
+                "status": "unknown", "attempt": "uncertain-attempt"}
+            public_store.save(path, state)
+            with self.assertRaisesRegex(RuntimeError, "delivery incomplete"):
+                public_runner.assert_event_delivered(event_id, path)
+            saved = public_store.load(path)
+            self.assertIn(event_id, saved["pending"])
+            self.assertEqual(saved["pending"][event_id]["recipients"][alias]["status"], "unknown")
+
+    def test_event_delivery_audit_requires_every_configured_recipient(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            state = deploy_fixture(public_runner.prepare(public_store.empty_state(), fixture(), True))
+            event_id = "weekly:2026-W33"
+            config, aliases = delivery_config(2)
+            state["pending"][event_id]["recipients"][aliases[0]] = {
+                "status": "accepted", "attempt": "accepted-attempt"}
+            public_store.save(path, state)
+            with self.assertRaisesRegex(RuntimeError, "missing"):
+                public_runner.assert_event_delivered(event_id, path, config)
+
+    def test_targeted_event_filter_does_not_select_other_pending_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "state.json")
+            state = deploy_fixture(public_runner.prepare(public_store.empty_state(), fixture(), True))
+            state = deploy_fixture(public_runner.prepare(state, fixture("2026-08-13", "暂缓追涨")),
+                                   "2026-08-14")
+            config, aliases = delivery_config(2)
+            target = "alert:2026-08-13"
+            state["pending"][target]["recipients"][aliases[0]] = {
+                "status": "accepted", "attempt": "original"}
+            public_store.save(path, state)
+
+            self.assertEqual(public_runner.eligible_events(aliases[0], path, config, target), [])
+            self.assertEqual(public_runner.eligible_events(aliases[1], path, config, target), [target])
+            self.assertEqual(public_runner.eligible_events(aliases[0], path, config), ["weekly:2026-W33"])
 
     def test_weekend_first_launch_week_equals_latest_due_week(self):
         cases = [("2026-10-10T19:35:00+08:00", "2026-10-09"),

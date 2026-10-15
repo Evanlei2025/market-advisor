@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from time import sleep
@@ -311,6 +312,21 @@ def verify_live_run(state_path=STATE, output=SITE, transport=requests.get, attem
     raise RuntimeError("public Pages verification failed: " + error) from None
 
 
+def verify_event_live_run(event_id, state_path=STATE, transport=requests.get):
+    """Verify all deployed files before resuming an existing notification event."""
+    state = public_store.load(state_path)
+    if event_id in state["delivered"]:
+        return "already-delivered"
+    event = state["pending"].get(event_id)
+    if not event:
+        raise ValueError("notification event is neither pending nor delivered")
+    require_deployed(state, event_id, event)
+    with tempfile.TemporaryDirectory(prefix="public-recovery-site-") as folder:
+        output = Path(folder, "site")
+        public_brief.render_site(output, state["weeks"], state["alerts"])
+        return verify_live_run(state_path, output, transport=transport)
+
+
 def mark_deployed(state_path=STATE, persist=public_store.save, output=SITE, deployment_id=None,
                   published_at=None):
     state = public_store.load(state_path)
@@ -356,17 +372,34 @@ def require_deployed(state, event_id, event):
             raise ValueError("weekly edition is not deployed")
 
 
-def eligible_events(alias, state_path=STATE, delivery_json=None):
+def eligible_events(alias, state_path=STATE, delivery_json=None, event_id=None):
     recipients = _delivery_recipients(delivery_json)
     if alias not in recipients:
         raise ValueError("invalid recipient alias")
     state = public_store.load(state_path)
     out = []
-    for event_id, event in state["pending"].items():
-        require_deployed(state, event_id, event)
+    for candidate_id, event in state["pending"].items():
+        if event_id is not None and candidate_id != event_id:
+            continue
+        require_deployed(state, candidate_id, event)
         if alias not in event["recipients"]:
-            out.append(event_id)
+            out.append(candidate_id)
     return out
+
+
+def assert_event_delivered(event_id, state_path=STATE, delivery_json=None):
+    state = public_store.load(state_path)
+    if event_id in state["delivered"]:
+        return True
+    event = state["pending"].get(event_id)
+    if not event:
+        raise ValueError("notification event is neither pending nor delivered")
+    aliases = (_delivery_recipients(delivery_json) if delivery_json
+               else sorted(event["recipients"]))
+    statuses = ", ".join(sorted(
+        alias + "=" + event["recipients"].get(alias, {}).get("status", "missing")
+        for alias in aliases))
+    raise RuntimeError("delivery incomplete for " + event_id + ": " + (statuses or "no recipients recorded"))
 
 
 def reserve_run(alias, attempt, event_id, state_path=STATE, delivery_json=None, persist=public_store.save):
@@ -460,7 +493,8 @@ def persist_ledger(state_path, state, run=subprocess.run):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", nargs="?", default="prepare",
-                        choices=["prepare", "verify-live", "deployed", "recipients", "events", "reserve", "notify", "reconcile"])
+                        choices=["prepare", "verify-live", "verify-event-live", "assert-delivered",
+                                 "deployed", "recipients", "events", "reserve", "notify", "reconcile"])
     parser.add_argument("--weekly", action="store_true", help="Publish an edition outside the Saturday schedule")
     parser.add_argument("--logical-date")
     parser.add_argument("--run-kind", choices=["auto", "daily", "weekly"], default="auto")
@@ -481,14 +515,19 @@ def main():
         prepare_run(context=context)
     elif args.phase == "verify-live":
         print("Verified public Pages site " + verify_live_run())
+    elif args.phase == "verify-event-live":
+        print("Verified notification event Pages " + verify_event_live_run(args.event))
+    elif args.phase == "assert-delivered":
+        assert_event_delivered(args.event, delivery_json=os.environ.get("ADVISOR_DELIVERY_JSON"))
+        print("Notification event delivered " + args.event)
     elif args.phase == "deployed":
         mark_deployed(deployment_id=args.deployment_id)
     elif args.phase == "recipients":
         for alias in _delivery_recipients(None):
             print(alias)
     elif args.phase == "events":
-        for event_id in eligible_events(args.recipient):
-            print(event_id)
+        for eligible in eligible_events(args.recipient, event_id=args.event):
+            print(eligible)
     elif args.phase == "reserve":
         reserve_run(args.recipient, args.attempt, args.event, persist=persist_ledger)
     elif args.phase == "reconcile":

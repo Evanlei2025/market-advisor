@@ -34,7 +34,8 @@ def completed_day(now):
     return now.date() if now.time() >= DAILY_TIME else now.date() - timedelta(days=1)
 
 
-def resolve(now=None, kind="auto", logical_date=None, schedule="", heartbeat=False, backfill=False):
+def resolve(now=None, kind="auto", logical_date=None, schedule="", heartbeat=False, backfill=False,
+            scheduled_for=None, trigger_id=None):
     now = now or datetime.now(TZ)
     if not isinstance(now, datetime) or now.tzinfo is None:
         raise ValueError("timezone-aware run datetime required")
@@ -66,18 +67,31 @@ def resolve(now=None, kind="auto", logical_date=None, schedule="", heartbeat=Fal
     if backfill and not logical_date:
         raise ValueError("backfill requires an explicit historical logical date")
     slot = WEEKLY_TIME if kind == "weekly" else time(22, 17) if heartbeat else DAILY_TIME
-    scheduled_for = datetime.combine(day, slot, TZ)
-    delay = max(0, int((now - scheduled_for).total_seconds())) if schedule else 0
+    if scheduled_for:
+        try:
+            planned_for = datetime.fromisoformat(scheduled_for)
+        except (TypeError, ValueError):
+            raise ValueError("scheduled slot must be an ISO-8601 timestamp with timezone") from None
+        if planned_for.tzinfo is None:
+            raise ValueError("scheduled slot must include a timezone")
+        planned_for = planned_for.astimezone(TZ)
+        if planned_for.date() != day or planned_for.time().replace(tzinfo=None) != slot:
+            raise ValueError("scheduled slot does not match the logical date and task kind")
+    else:
+        planned_for = datetime.combine(day, slot, TZ)
+    tracked_schedule = bool(schedule or scheduled_for)
+    delay = max(0, int((now - planned_for).total_seconds())) if tracked_schedule else 0
     # The heartbeat's market cutoff is 19:35, but its expected trigger is 22:17.
     # Between these slots today's snapshot is due even when a previous heartbeat
     # is delayed. Use the last elapsed trigger solely for latency telemetry.
-    if heartbeat and schedule and now < scheduled_for:
-        scheduled_for -= timedelta(days=1)
-        delay = max(0, int((now - scheduled_for).total_seconds()))
+    if heartbeat and schedule and not scheduled_for and now < planned_for:
+        planned_for -= timedelta(days=1)
+        delay = max(0, int((now - planned_for).total_seconds()))
     return {"kind": kind, "logical_date": day.isoformat(), "backfill": bool(backfill),
-            "observed_at": now.isoformat(), "scheduled_for": scheduled_for.isoformat(),
+            "observed_at": now.isoformat(), "scheduled_for": planned_for.isoformat(),
             "schedule": schedule, "delay_seconds": delay,
-            "delay_exceeds_grace": bool(schedule and delay > DELAY_GRACE_SECONDS)}
+            "delay_exceeds_grace": bool(tracked_schedule and delay > DELAY_GRACE_SECONDS),
+            "trigger_id": trigger_id or ""}
 
 
 def main():
@@ -88,7 +102,9 @@ def main():
     context = resolve(kind=os.environ.get("PUBLIC_RUN_KIND", "auto"),
                       logical_date=os.environ.get("PUBLIC_LOGICAL_DATE") or None,
                       schedule=os.environ.get("PUBLIC_SCHEDULE", ""), heartbeat=args.heartbeat,
-                      backfill=os.environ.get("PUBLIC_BACKFILL", "false").lower() == "true")
+                      backfill=os.environ.get("PUBLIC_BACKFILL", "false").lower() == "true",
+                      scheduled_for=os.environ.get("PUBLIC_SCHEDULED_FOR") or None,
+                      trigger_id=os.environ.get("PUBLIC_TRIGGER_ID") or None)
     Path(args.output).write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(context))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
