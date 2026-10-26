@@ -1,3 +1,4 @@
 ﻿akshare==1.18.81
 requests>=2.31,<3.0
 pandas>=2.0,<3.0
+tzdata>=2025.2

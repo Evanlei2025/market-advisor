@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -18,14 +19,18 @@ ASSETS = {
 BENCHMARK = "沪深300"
 
 
-def expected_session(today, fetcher, ak=None):
+def _trade_dates(fetcher, ak=None):
+    calendar = (fetcher.trade_calendar() if hasattr(fetcher, "trade_calendar")
+                else fetcher._ak(ak.tool_trade_date_hist_sina, timeout=20))
+    if calendar is None or "trade_date" not in calendar:
+        raise ValueError("missing trade calendar")
+    return pd.to_datetime(calendar["trade_date"], errors="coerce").dt.date.dropna()
+
+
+def expected_session(today, fetcher, ak=None, calendar_dates=None):
     """Return the latest verified exchange session; never infer holidays."""
     try:
-        calendar = (fetcher.trade_calendar() if hasattr(fetcher, "trade_calendar")
-                    else fetcher._ak(ak.tool_trade_date_hist_sina, timeout=20))
-        if calendar is None or "trade_date" not in calendar:
-            raise ValueError("missing trade calendar")
-        dates = pd.to_datetime(calendar["trade_date"], errors="coerce").dt.date.dropna()
+        dates = calendar_dates if calendar_dates is not None else _trade_dates(fetcher, ak)
         available = dates[(dates <= today) & (dates >= today - timedelta(days=20))]
         if not available.empty:
             return max(available).isoformat()
@@ -44,7 +49,15 @@ def session_age(observed, today):
                for i in range(1, (end - start).days + 1))
 
 
-def series_metrics(frame, today, date_key="date", price_key="close"):
+def _calendar_age(observed, today, calendar_dates):
+    start = date.fromisoformat(str(observed)[:10])
+    end = date.fromisoformat(str(today)[:10])
+    if start > end:
+        raise ValueError("future observation")
+    return sum(start < stamp <= end for stamp in calendar_dates)
+
+
+def series_metrics(frame, today, date_key="date", price_key="close", calendar_dates=None):
     if frame is None or date_key not in frame or price_key not in frame:
         raise ValueError("missing price columns")
     d = frame[[date_key, price_key]].copy()
@@ -56,7 +69,11 @@ def series_metrics(frame, today, date_key="date", price_key="close"):
         raise ValueError("fewer than 61 valid sessions")
     prices = d[price_key]
     observed = d[date_key].iloc[-1].date().isoformat()
-    if session_age(observed, today) > 2:
+    if calendar_dates is None:
+        age = session_age(observed, today)
+    else:
+        age = _calendar_age(observed, today, calendar_dates)
+    if age > 2:
         raise ValueError("stale price history: " + observed)
     last = float(prices.iloc[-1])
     returns = {str(n): round((last / float(prices.iloc[-1-n]) - 1) * 100, 2)
@@ -85,19 +102,29 @@ def _valid_number(value):
         return None
 
 
-def collect(today=None, fetcher=None, ak=None):
+def collect(today=None, fetcher=None, ak=None, generated_at=None):
     """Collect a snapshot from a shared classification; no holdings or model calls."""
-    today = today or datetime.now(TZ).date()
+    generated_at = generated_at or datetime.now(TZ)
+    if not isinstance(generated_at, datetime) or generated_at.tzinfo is None:
+        raise ValueError("timezone-aware generation timestamp required")
+    generated_at = generated_at.astimezone(TZ)
+    today = today or generated_at.date()
     if fetcher is None:
         from public_sources import DataFetcher
         fetcher = DataFetcher()
-    expected = expected_session(today, fetcher, ak)
+    try:
+        calendar_dates = _trade_dates(fetcher, ak)
+    except Exception as exc:
+        raise ValueError("verified trading calendar unavailable") from exc
+    expected = expected_session(today, fetcher, ak, calendar_dates)
     market_day = date.fromisoformat(expected)
-    snapshot = {"schema": 1, "date": today.isoformat(), "assets": {}, "sectors": {},
+    snapshot = {"schema": 1, "date": generated_at.date().isoformat(),
+                "generated_at": generated_at.isoformat(), "assets": {}, "sectors": {},
                 "quality": [], "asof": None}
     for name, symbol in ASSETS.items():
         try:
-            snapshot["assets"][name] = series_metrics(fetcher.index_daily(symbol, days=180), market_day)
+            snapshot["assets"][name] = series_metrics(fetcher.index_daily(symbol, days=180), market_day,
+                                                       calendar_dates=calendar_dates)
         except Exception as exc:
             snapshot["quality"].append(f"{name}行情不可用：{type(exc).__name__}")
     if BENCHMARK not in snapshot["assets"]:
@@ -133,7 +160,7 @@ def collect(today=None, fetcher=None, ak=None):
         try:
             hist = (fetcher.industry_history(code) if hasattr(fetcher, "industry_history")
                     else fetcher._ak(ak.index_hist_sw, symbol=code.split(".")[0], period="day", timeout=22))
-            item = series_metrics(hist, market_day, "日期", "收盘")
+            item = series_metrics(hist, market_day, "日期", "收盘", calendar_dates)
             if item["date"] != snapshot["asof"]:
                 raise ValueError("sector and benchmark observation dates differ")
             item["code"] = code
@@ -164,23 +191,37 @@ def collect(today=None, fetcher=None, ak=None):
     try:
         bonds = fetcher.bond_rates()
         if bonds is not None and not bonds.empty:
-            b = bonds.sort_values("date").iloc[-1]
+            eligible = bonds.copy()
+            eligible["date"] = pd.to_datetime(eligible["date"], errors="coerce")
+            eligible = eligible.dropna(subset=["date"])
+            eligible = eligible[eligible["date"].dt.date <= market_day]
+            if eligible.empty:
+                raise ValueError("no bond yield on or before market date")
+            b = eligible.sort_values("date").iloc[-1]
             bd = pd.to_datetime(b["date"]).date().isoformat()
             val = _valid_number(b["y10"])
-            if val is not None and session_age(bd, market_day) <= 2:
+            if val is not None and _calendar_age(bd, market_day, calendar_dates) <= 2:
                 snapshot["bond_y10"] = {"date": bd, "yield_pct": round(val, 3)}
             else:
                 snapshot["quality"].append("十年国债收益率日期滞后")
+        else:
+            snapshot["quality"].append("十年国债收益率不可用")
     except Exception:
         snapshot["quality"].append("十年国债收益率不可用")
     try:
         cash = (fetcher.shibor() if hasattr(fetcher, "shibor")
                 else fetcher._ak(ak.rate_interbank, indicator="3月", timeout=25))
-        cash = cash.sort_values("报告日").dropna(subset=["报告日", "利率"])
+        cash = cash.copy()
+        cash["_date"] = pd.to_datetime(cash["报告日"], errors="coerce")
+        cash["利率"] = pd.to_numeric(cash["利率"], errors="coerce")
+        cash = cash.dropna(subset=["_date", "利率"])
+        cash = cash[cash["_date"].dt.date <= market_day].sort_values("_date")
+        if cash.empty:
+            raise ValueError("no Shibor on or before market date")
         row = cash.iloc[-1]
-        cd = str(row["报告日"])[:10]
+        cd = row["_date"].date().isoformat()
         rate = _valid_number(row["利率"])
-        if rate is not None and session_age(cd, market_day) <= 2:
+        if rate is not None and _calendar_age(cd, market_day, calendar_dates) <= 2:
             snapshot["cash_shibor"] = {"date": cd, "rate_pct": round(rate, 3)}
         else:
             snapshot["quality"].append("3月期Shibor日期滞后")
@@ -189,7 +230,7 @@ def collect(today=None, fetcher=None, ak=None):
     try:
         gold = (fetcher.gold_daily() if hasattr(fetcher, "gold_daily")
                 else fetcher._ak(ak.spot_hist_sge, symbol="Au99.99", timeout=25))
-        snapshot["gold"] = series_metrics(gold, market_day)
+        snapshot["gold"] = series_metrics(gold, market_day, calendar_dates=calendar_dates)
         snapshot["gold"]["proxy"] = "Au99.99现货"
     except Exception:
         snapshot["quality"].append("Au99.99现货不可用；不以期货冒充")
@@ -198,13 +239,23 @@ def collect(today=None, fetcher=None, ak=None):
             result = getattr(fetcher, method)()
             if result and result[1]:
                 period = str(result[1])
+                release = pd.Timestamp(result[2]) if len(result) > 2 and result[2] else pd.NaT
+                if pd.notna(release):
+                    release = (release.tz_localize(TZ) if release.tzinfo is None
+                               else release.tz_convert(TZ))
                 year, month = map(int, period.split("-"))
-                age = (today.year - year) * 12 + today.month - month
-                if 0 <= age <= 3 and math.isfinite(float(result[0])):
+                age = (market_day.year - year) * 12 + market_day.month - month
+                release_text = str(result[2]) if len(result) > 2 and result[2] else ""
+                has_clock = bool(re.search(r"\d{1,2}:\d{2}", release_text))
+                release_known_by_run = (pd.notna(release) and release <= generated_at
+                                        and (release.date() < generated_at.date() or has_clock))
+                if (0 <= age <= 3 and math.isfinite(float(result[0])) and release_known_by_run):
                     snapshot.setdefault("macro", {})[name] = {"period": period,
-                                                               "yoy_pct": round(float(result[0]), 2)}
+                        "yoy_pct": round(float(result[0]), 2), "published_at": release.isoformat()}
                 else:
-                    snapshot["quality"].append(f"{name}统计期过旧，已排除")
+                    snapshot["quality"].append(f"{name}统计期或发布日期不可验证，已排除")
+            else:
+                snapshot["quality"].append(f"{name}统计期不可用")
         except Exception:
             snapshot["quality"].append(f"{name}统计期不可用")
     try:
@@ -237,7 +288,8 @@ def collect(today=None, fetcher=None, ak=None):
                 except (ValueError, TypeError):
                     invalid_times += 1
                     continue
-                if not (market_day - timedelta(days=7) <= published.date() <= today):
+                if not (market_day - timedelta(days=7) <= published.date() <= generated_at.date()
+                        and published <= generated_at):
                     continue
                 title = str(story["标题"]).strip().replace("\n", " ")
                 if len(title) < 8 or len(title) > 100:
@@ -313,20 +365,3 @@ def research(snapshot):
             "macro": snapshot.get("macro", {}),
             "news": snapshot.get("news", []),
             "quality": snapshot["quality"]}
-
-
-def changes(current, previous):
-    if not previous:
-        return []
-    events = []
-    for name, item in current["sectors"].items():
-        old = previous.get("sectors", {}).get(name)
-        if not old or old["state"] == item["state"] or old["state"] == "资料不足":
-            continue
-        # Missing valuation or data never counts as a market recovery.
-        if item["state"] == "资料不足":
-            continue
-        events.append({"id": f"{current['asof']}:{name}:{old['state']}:{item['state']}",
-                       "entity": name, "before": old["state"], "after": item["state"],
-                       "relative20_pp": item["relative20_pp"]})
-    return events

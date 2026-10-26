@@ -1,37 +1,43 @@
-# 公共市场机会与风险简报
+# 本地市场简报
 
-工作日采集国内宽基、申万一级行业、中证全债、黄金现货与利率数据；重要状态变化才提醒，周末发布一次总结。报告不读取客户持仓、成本或交易，不提供个性化买卖指令。
+需要时运行一次，读取公开市场数据并在本机生成 HTML、Markdown 和研究快照，然后退出。运行不需要 GitHub、Cloudflare、Healthchecks、消息渠道或 AI 凭据。
 
-## 运行方式
+## 首次设置
 
-```powershell
-python public_runner.py prepare
-python -m unittest -q test_public.py
-```
-
-本地与云端使用 Python 3.12，按 `requirements.txt` 安装依赖（pandas `<3`）。公共数据采集由 `public_sources.py` 独立提供。生产工作流仅从 `public_data/state.json` 恢复公开研究状态，并从新版 `ADVISOR_CONFIG` Secret 读取微信收件渠道；Pages 部署后先核验实际公开 manifest 和所有页面哈希，再落账与通知。历史客户模块暂保留，待实际工作日与周六运行观察完成后再移除。
-
-公开状态使用 schema 3，兼容 schema 1/2 迁移。通知发送前先将 unknown 保存、提交并成功推送账本；不确定结果需人工核对，不能重复使用同一 attempt。心跳检查最近一个已到周六 19:35 截止时间的周报，`PUBLIC_HEARTBEAT_URL` 是无人值守上线必需配置。
-
-2026-10-11 已完成真实上线、公开页面核验、订阅通知和外部心跳。2026-10-13 维修将逻辑任务日期与实际启动时间分离，避免 GitHub schedule 延迟到凌晨后误要求尚未收盘的当日行情。
-
-工作日和心跳在上海时间 19:35 前使用前一逻辑日，之后使用当天；周六 schedule 始终绑定最近一个周六并生成当周周报。工作流使用 `github.event.schedule` 区分任务，并记录启动延迟；超过 2 小时的调度延迟单独通知维护者。缺失超过一个交易日时停止并要求显式逐日补跑。
-
-历史补跑入口（只准备快照、观察点和站点，后续由工作流部署；抑制新增变化提醒）：
+安装 64 位 Python 3.12，然后在项目目录运行：
 
 ```powershell
-python public_runner.py prepare --run-kind daily --logical-date 2026-10-12 --backfill
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-GitHub Actions 手动运行 `public-market-brief` 时指定 `logical_date`，历史恢复勾选 `backfill`，普通日不勾选 `publish_weekly`。同一日未到 19:35 时拒绝提前采集；补跑按日期顺序进行，不重新生成已发布周报或重复其通知。
+本机若 `py -3.12` 提示未注册 Python，可直接使用现有的 3.12 路径创建环境：
 
-空状态默认在上海时间周六 19:35 后或周日首发，首期周次必须与最近到期周一致。工作日首次启动需先完成独立启动规则，当前版本尚不支持。实际上线顺序与配置检查见交接文档。
+```powershell
+& 'D:\每周推送\market_advisor-validation\py312\python.exe' -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
 
-## 内容
+## 生成报告
 
-- 首页和最新周报：`https://Evanlei2025.github.io/market-advisor/`
-- 5/20/60 交易日的指数表现与行业相对强度、成交参与、估值可用性和风险。
-- 上次研究观察回顾使用发布后的下一交易日收盘作为参考，非真实基金或客户收益。
-- 资料不足时保留上次成功发布的网页，通知维护者而不是虚构机会。
+双击 `生成周报.cmd`，或运行：
 
-配置、故障恢复和客户数据迁移见 [公共服务交接文档](docs/PUBLIC_SERVICE.md)。样例收件格式见 [public_delivery.example.json](public_delivery.example.json)。
+```powershell
+.\.venv\Scripts\python.exe local_report.py
+```
+
+每次成功运行会创建 `reports/<生成时间>/report.html`、`report.md` 和 `research.json`；`reports/latest.html` 指向最近一次成功报告。HTML 可离线打开。历史目录不会被覆盖。
+
+## 日期与失败处理
+
+行情以真实交易日历确认的最近已完成交易日为准。上海时间 19:35 前不采用当天行情，之后才尝试采用当天已完成行情。周中报告展示截至当日的周度视角，不代表整周收盘结果。正文同时标注行情日期和实际生成时间。
+
+关键行情、交易日历或最低覆盖缺失时，运行会返回错误，不生成新报告，也不覆盖上次成功的 `latest.html`。可选利率、黄金、宏观或新闻数据缺失时，会在报告中说明。
+
+本地离线测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest -q
+```
+
+旧云端发布、通知和遗留客户程序已从本地运行入口退休。旧状态账本保存在项目外归档中，不会读取、改写或补发。云端账户当前状态仍需账户持有人单独确认，删除本地工作流不代表云端服务已停用。

@@ -1,4 +1,4 @@
-"""Data sources used by the public market brief.
+"""Public market-data sources used by the one-shot local report.
 
 This module deliberately contains no client configuration or portfolio logic.
 AkShare calls run through a bounded daemon thread because some AkShare
@@ -104,9 +104,11 @@ class DataFetcher:
             frame = self._ak(getattr(self.ak, function_name), timeout=30)
             date_col = _pick_column(frame, "月份", "月")
             value_col = next((column for column in frame.columns if "同比" in str(column)), None)
+            release_col = _pick_column(frame, "发布日期", "发布时间", "發布日期")
             if not date_col or not value_col:
                 return None
-            values = frame[[date_col, value_col]].copy().dropna()
+            columns = [date_col, value_col] + ([release_col] if release_col else [])
+            values = frame[columns].copy().dropna(subset=[date_col, value_col])
             parts = values[date_col].astype(str).str.extract(r"(\d{4})[年\-/]?(\d{1,2})")
             values["_period"] = (pd.to_numeric(parts[0], errors="coerce") * 100
                                   + pd.to_numeric(parts[1], errors="coerce"))
@@ -118,7 +120,8 @@ class DataFetcher:
                 return None
             match = re.search(r"(\d{4})[年\-/]?(\d{1,2})", str(values[date_col].iloc[-1]))
             period = f"{int(match.group(1)):04d}-{int(match.group(2)):02d}" if match else ""
-            return value, period
+            published = str(values[release_col].iloc[-1]) if release_col else None
+            return value, period, published
         except Exception:
             return None
 

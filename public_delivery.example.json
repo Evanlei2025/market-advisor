@@ -1,9 +1,0 @@
-{
-  "recipients": [
-    {
-      "id": "primary",
-      "channel": "serverchan",
-      "key": "PASTE_SERVERCHAN_SENDKEY_HERE"
-    }
-  ]
-}

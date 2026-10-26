@@ -1,15 +1,10 @@
 # -*- coding: utf-8 -*-
-"""akshare 调用统一超时保护（ak 内部 requests 无 timeout，网络异常时可能永久挂起）。
-
-纯 stdlib 线程包装：超时抛 TimeoutError，由调用方（fetch_section 等）重试或降级。
-main/rules/state_store 共用（aktime 无任何依赖，避免循环 import）。
-"""
+"""Bounded worker wrapper for AkShare calls that lack request timeouts."""
 import threading
 
 
 def call_with_timeout(fn, timeout=90, *args, **kwargs):
-    """在独立 daemon 线程中执行 fn(*args, **kwargs)，超过 timeout 秒抛 TimeoutError。
-    成功原样返回；异常原样传播（含 TimeoutError）。"""
+    """Run a network call on a daemon thread and raise after its time budget."""
     out = {}
 
     def _run():
